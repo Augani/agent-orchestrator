@@ -235,6 +235,59 @@ class CliAgentJobTests(unittest.TestCase):
             routes = json.loads(self.run_cli("routes", env=env).stdout)
             self.assertEqual(routes["quality-first"]["executor"]["model"], "gpt-6-astra")
             self.assertEqual(routes["economy-first"]["executor"]["model"], "gpt-5.6-luna")
+            choices = json.loads(self.run_cli("choices", "--include-unavailable", "--json", env=env).stdout)
+            harness_names = {item["cli"] for item in choices["harnesses"]}
+            self.assertTrue({"codex-cli", "claude-code", "kimi-code", "grok"}.issubset(harness_names))
+            claude = next(item for item in choices["harnesses"] if item["cli"] == "claude-code")
+            self.assertEqual(claude["configured_models"], ["sonnet", "opus", "fable"])
+
+            canonical_choices = json.loads(self.run_cli("choices", "--json", env=env).stdout)
+            canonical_names = {item["cli"] for item in canonical_choices["harnesses"]}
+            self.assertNotIn("claude", canonical_names)
+
+    def test_structured_model_discovery_is_compacted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            helper = root / "models.py"
+            helper.write_text(
+                "import json\n"
+                "print(json.dumps({'models': [{'slug': 'smart-model', 'display_name': 'Smart', "
+                "'description': 'For hard work', 'default_reasoning_level': 'medium', "
+                "'supported_reasoning_levels': [{'effort': 'low'}, {'effort': 'high'}], "
+                "'private_payload': 'must-not-leak'}]}))\n",
+                encoding="utf-8",
+            )
+            config = root / "agents.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "discoverable": {
+                                "argv": [sys.executable, "-c", "pass", "{prompt_file}"],
+                                "prompt_transport": "file",
+                                "discover_models_argv": [sys.executable, str(helper)],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            result = self.run_cli(
+                "catalog",
+                "--cli",
+                "discoverable",
+                "--workspace",
+                str(root),
+                "--config",
+                str(config),
+                env=env,
+            )
+            models = json.loads(result.stdout)["discoverable"]["models"]
+            self.assertEqual(models["choices"][0]["id"], "smart-model")
+            self.assertEqual(models["choices"][0]["reasoning_efforts"], ["low", "high"])
+            self.assertNotIn("private_payload", json.dumps(models))
 
     def test_quality_route_plan_usage_and_review_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

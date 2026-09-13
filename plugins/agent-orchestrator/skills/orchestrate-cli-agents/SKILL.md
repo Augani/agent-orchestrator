@@ -18,9 +18,10 @@ state is stored outside the repository under `~/.codex/agent-orchestrator/` by d
 Treat the CLI, its model, and its internal agent/persona as separate choices. The user may specify
 any subset in natural language; preserve every explicit choice exactly.
 
-1. Run `profiles` for a quick installed-capability view or `catalog --cli <name>` for live model and
-   internal-agent discovery. Use `catalog --cli all --query <model-or-agent>` when the user names a
-   model or agent but not the CLI.
+1. Run `choices --json` to present installed harnesses alongside the routing flows. If the user
+   selects a harness, run `catalog --cli <name>` for its live or configured model and internal-agent
+   choices. Use `catalog --cli all --query <model-or-agent>` when the user names a model or agent but
+   not the CLI. Use `choices --include-unavailable` only for installation help.
 2. If the user chose only a CLI, show that CLI's available models and internal agents when
    discoverable. Offer its configured default as a no-extra-choice option.
 3. If the user chose only a model or internal agent, resolve which installed CLIs offer it. If one
@@ -41,6 +42,8 @@ launch and let the user choose:
 - custom: pass `--coordinator-model`, `--cli`, `--model`, and `--reasoning-effort` explicitly.
 
 Explicit user choices override route defaults. Never silently substitute the opposite flow.
+The built-in routes use Codex CLI defaults, but either route can be combined with any installed
+harness by passing explicit `--cli`, `--model`, `--cli-agent`, and `--reasoning-effort` values.
 
 ```bash
 python3 <runner> catalog --cli grok --json

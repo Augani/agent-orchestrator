@@ -4,6 +4,8 @@
 
 - Add user-selectable `quality-first` and `economy-first` coordinator/executor routes plus custom
   model-role overrides.
+- Add an installed-harness chooser and compact live Codex model discovery; surface configured Claude
+  model aliases and each harness's supported controls.
 - Add durable plans, decision records, checklist-bound jobs, and resumable plan status.
 - Enforce a 64 KiB context-capsule budget for built-in routes with planning guidance for larger
   work.

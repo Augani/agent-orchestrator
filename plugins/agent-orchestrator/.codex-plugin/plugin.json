@@ -14,7 +14,7 @@
   "interface": {
     "displayName": "Agent Orchestrator",
     "shortDescription": "Choose coordinator and executor models for durable coding plans.",
-    "longDescription": "Codex turns one request into a durable plan, lets users choose quality-first, economy-first, or custom model roles, dispatches bounded CLI jobs, handles clarification questions, captures usage and progress, and requires diff and test evidence before acceptance.",
+    "longDescription": "Codex turns one request into a durable plan, presents installed CLI harnesses and their model or agent choices, supports quality-first, economy-first, or custom model roles, handles clarification questions, captures usage and progress, and requires diff and test evidence before acceptance.",
     "developerName": "Augustus Otu",
     "category": "Productivity",
     "capabilities": [

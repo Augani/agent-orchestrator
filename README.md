@@ -47,6 +47,8 @@ alone. [OpenAI model guidance](https://developers.openai.com/api/docs/guides/lat
   evidence.
 - User-selectable model-role routes, task-capsule budgets, reasoning-effort selection, and
   provider-reported usage capture.
+- A concise installed-harness chooser followed by harness-specific model and internal-agent
+  discovery.
 - A required detailed task contract and a Codex review/repair gate.
 - JSON adapter configuration for additional headless coding CLIs without shell interpolation.
 
@@ -82,10 +84,20 @@ authenticated separately; Agent Orchestrator never stores provider credentials.
 Run the catalog before choosing:
 
 ```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py choices --json
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py profiles
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py doctor --cli all
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli codex-cli
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli claude-code
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli kimi-code
 ```
+
+`choices` shows only installed harnesses by default. Once the user chooses one, `catalog` shows its
+live model list where the CLI exposes one, configured aliases otherwise, available internal agents,
+and supported controls. Codex model discovery is compacted to model IDs, descriptions, defaults,
+and reasoning-effort choices instead of loading the CLI's full catalog payload into coordinator
+context. Claude Code currently exposes the configured aliases `sonnet`, `opus`, and `fable`; omit
+`--model` to use the user's Claude default.
 
 `doctor --cli all` exits non-zero when any built-in CLI is missing; that is expected when you only
 install the agents you use.
@@ -96,8 +108,8 @@ Run `routes` to inspect the built-in policies:
 
 | Route | Coordinator | Executor | Best when |
 | --- | --- | --- | --- |
-| `quality-first` | GPT-5.6 Luna | Codex CLI + GPT-6 Astra, high effort | You want the best bounded execution while keeping the long coordination thread inexpensive. |
-| `economy-first` | GPT-6 Astra | Codex CLI + GPT-5.6 Luna, high effort | Architecture and review are hard, but implementation items can be specified precisely. |
+| `quality-first` | GPT-5.6 Luna | Defaults to Codex CLI + GPT-6 Astra, high effort | You want the best bounded execution while keeping the long coordination thread inexpensive. |
+| `economy-first` | GPT-6 Astra | Defaults to Codex CLI + GPT-5.6 Luna, high effort | Architecture and review are hard, but implementation items can be specified precisely. |
 | Custom | Your choice | Any supported CLI/model/agent/effort | You want another provider or complete control over the pairing. |
 
 Routes fill only missing values. Explicit selections always win:
@@ -122,6 +134,10 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --task-file /path/to/task.md \
   --json
 ```
+
+The route does not lock execution to Codex CLI. For example, Luna can coordinate while Claude Code,
+Kimi Code, Grok, Devin, Gemini, DeepSeek Harness, OpenCode, or a custom adapter executes. Codex first
+presents what is actually installed, then the selected harness's available model and agent choices.
 
 The coordinator model is recorded as workflow metadata; select that model for the Codex task where
 you invoke the plugin. Model availability and billing depend on your account and provider.

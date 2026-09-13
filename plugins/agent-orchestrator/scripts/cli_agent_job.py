@@ -168,6 +168,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "cli_agent_args": ["--agent", "{cli_agent}"],
         "cost_args": ["--max-budget-usd", "{max_cost_usd}"],
         "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
+        "models": ["sonnet", "opus", "fable"],
     },
     "claude": {
         "display_name": "Claude Code (compatibility alias)",
@@ -189,6 +190,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "cli_agent_args": ["--agent", "{cli_agent}"],
         "cost_args": ["--max-budget-usd", "{max_cost_usd}"],
         "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
+        "models": ["sonnet", "opus", "fable"],
     },
     "codex-cli": {
         "display_name": "Codex CLI",
@@ -211,6 +213,8 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "prompt_transport": "stdin",
         "model_args": ["--model", "{model}"],
+        "models": ["gpt-6-astra", "gpt-5.6-luna"],
+        "discover_models_argv": ["codex", "debug", "models"],
         "reasoning_effort_args": [
             "--config",
             "model_reasoning_effort=\"{reasoning_effort}\"",
@@ -1072,6 +1076,40 @@ def command_doctor(args: argparse.Namespace) -> int:
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+def compact_model_discovery(output: str, query: str | None) -> list[dict[str, Any]] | None:
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    models = value.get("models") if isinstance(value, dict) else value
+    if not isinstance(models, list) or not all(isinstance(model, dict) for model in models):
+        return None
+    choices: list[dict[str, Any]] = []
+    for model in models:
+        if model.get("visibility") not in (None, "list"):
+            continue
+        model_id = model.get("slug") or model.get("id") or model.get("model")
+        if not isinstance(model_id, str):
+            continue
+        supported_efforts = model.get("supported_reasoning_levels", [])
+        efforts = [
+            item.get("effort")
+            for item in supported_efforts
+            if isinstance(item, dict) and isinstance(item.get("effort"), str)
+        ]
+        item = {
+            "id": model_id,
+            "display_name": model.get("display_name"),
+            "description": model.get("description"),
+            "default_reasoning_effort": model.get("default_reasoning_level"),
+            "reasoning_efforts": efforts,
+        }
+        if query and query.casefold() not in json.dumps(item, sort_keys=True).casefold():
+            continue
+        choices.append(item)
+    return choices
+
+
 def discovery_result(
     profile: dict[str, Any],
     key: str,
@@ -1104,6 +1142,20 @@ def discovery_result(
         result.update({"discovery": "timed_out", "command": command})
         return result
     output = ANSI_RE.sub("", (completed.stdout or completed.stderr).strip())
+    structured_models = compact_model_discovery(output, query) if key == "discover_models_argv" else None
+    if structured_models is not None:
+        result.update(
+            {
+                "discovery": "succeeded" if completed.returncode == 0 else "failed",
+                "command": command,
+                "exit_code": completed.returncode,
+                "choices": structured_models if full else structured_models[:120],
+            }
+        )
+        if len(structured_models) > 120 and not full:
+            result["compact"] = True
+            result["hint"] = "Use --query <text> for exact matches or --full for every model."
+        return result
     if query:
         lowered = query.casefold()
         output = "\n".join(line for line in output.splitlines() if lowered in line.casefold())
@@ -1168,6 +1220,60 @@ def command_catalog(args: argparse.Namespace) -> int:
             item["cli_agents"] = {"configured": profile.get("cli_agents", []), "discovery": "skipped"}
         catalog[name] = item
     print(json.dumps(catalog, indent=2, sort_keys=True))
+    return 0
+
+
+def command_choices(args: argparse.Namespace) -> int:
+    profiles = load_profiles(config_path(args.config))
+    harnesses: list[dict[str, Any]] = []
+    for name, profile in sorted(profiles.items()):
+        if profile.get("maturity") == "legacy" and not args.include_unavailable:
+            continue
+        executable, found = resolve_profile_executable(profile)
+        if not found and not args.include_unavailable:
+            continue
+        harnesses.append(
+            {
+                "cli": name,
+                "display_name": profile.get("display_name", name),
+                "available": bool(found),
+                "executable": executable,
+                "maturity": profile.get("maturity", "stable"),
+                "configured_models": profile.get("models", []),
+                "configured_cli_agents": profile.get("cli_agents", []),
+                "supports": {
+                    "model": "model_args" in profile,
+                    "cli_agent": "cli_agent_args" in profile,
+                    "reasoning_effort": "reasoning_effort_args" in profile,
+                    "max_turns": "max_turns_args" in profile,
+                    "max_cost_usd": "cost_args" in profile,
+                },
+                "install_hint": profile.get("install_hint") if not found else None,
+            }
+        )
+    output = {
+        "routes": BUILTIN_ROUTES,
+        "harnesses": harnesses,
+        "selection": {
+            "route_defaults_are_overridable": True,
+            "custom_fields": ["coordinator_model", "cli", "model", "cli_agent", "reasoning_effort"],
+            "next_step": "Use catalog --cli <name> for live model and internal-agent discovery.",
+        },
+    }
+    if args.json:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    print("ROUTES")
+    for name, route in sorted(BUILTIN_ROUTES.items()):
+        print(
+            f"{name}\t{route['coordinator']['model']} -> "
+            f"{route['executor']['cli']} / {route['executor']['model']}"
+        )
+    print("\nAVAILABLE HARNESSES")
+    for item in harnesses:
+        controls = ",".join(key for key, supported in item["supports"].items() if supported) or "defaults"
+        availability = "installed" if item["available"] else "unavailable"
+        print(f"{item['cli']}\t{availability}\t{item['maturity']}\t{controls}")
     return 0
 
 
@@ -1980,6 +2086,12 @@ def build_parser() -> argparse.ArgumentParser:
     catalog.add_argument("--config")
     catalog.add_argument("--json", action="store_true")
     catalog.set_defaults(func=command_catalog)
+
+    choices = subparsers.add_parser("choices", help="Show routing flows and installed CLI harnesses")
+    choices.add_argument("--include-unavailable", action="store_true")
+    choices.add_argument("--config")
+    choices.add_argument("--json", action="store_true")
+    choices.set_defaults(func=command_choices)
 
     doctor = subparsers.add_parser("doctor", help="Check agent executables")
     doctor.add_argument("--cli", "--agent", dest="cli", default="all")
