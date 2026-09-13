@@ -383,6 +383,87 @@ class CliAgentJobTests(unittest.TestCase):
             self.assertTrue(plan["complete"])
             self.assertEqual(plan["items"][0]["state"], "done")
 
+    def test_quality_route_preserves_explicit_selections(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            self.write_structured_task(task)
+            config = root / "agents.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "override-worker": {
+                                "argv": [
+                                    sys.executable,
+                                    "-c",
+                                    "import json,pathlib,sys; pathlib.Path(sys.argv[1]).read_text(); print(json.dumps(sys.argv[2:]))",
+                                    "{prompt_file}",
+                                ],
+                                "prompt_transport": "file",
+                                "model_args": ["--model", "{model}"],
+                                "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            # Keep a regression to the route's default CLI local, too.
+            self.install_fake_codex(root, env)
+            launched = self.run_cli(
+                "launch",
+                "--route",
+                "quality-first",
+                "--cli",
+                "override-worker",
+                "--model",
+                "chosen-executor",
+                "--reasoning-effort",
+                "low",
+                "--coordinator-model",
+                "chosen-coordinator",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--config",
+                str(config),
+                "--no-notify",
+                "--json",
+                env=env,
+            )
+            launch_data = json.loads(launched.stdout)
+            job_id = launch_data["job_id"]
+            waited = self.run_cli(
+                "wait",
+                job_id,
+                "--timeout-seconds",
+                "10",
+                "--poll-seconds",
+                "0.1",
+                "--json",
+                env=env,
+            )
+            status = json.loads(waited.stdout)
+            self.assertEqual(status["state"], "succeeded")
+            for source, metadata in (("launch", launch_data), ("status", status)):
+                with self.subTest(source=source):
+                    self.assertEqual(metadata["route"], "quality-first")
+                    self.assertEqual(metadata["coordinator_model"], "chosen-coordinator")
+                    self.assertEqual(metadata["cli"], "override-worker")
+                    self.assertEqual(metadata["model"], "chosen-executor")
+                    self.assertEqual(metadata["reasoning_effort"], "low")
+            logs = self.run_cli("logs", job_id, "--stream", "stdout", env=env)
+            self.assertEqual(
+                json.loads(logs.stdout),
+                ["--model", "chosen-executor", "--effort", "low"],
+            )
+
     def test_quality_route_rejects_oversized_context_capsule(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
