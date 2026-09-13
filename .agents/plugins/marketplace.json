@@ -1,0 +1,20 @@
+{
+  "name": "agent-orchestrator",
+  "interface": {
+    "displayName": "Agent Orchestrator"
+  },
+  "plugins": [
+    {
+      "name": "agent-orchestrator",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-orchestrator"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

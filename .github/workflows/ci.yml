@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate JSON manifests
+        run: |
+          python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
+          python3 -m json.tool plugins/agent-orchestrator/.codex-plugin/plugin.json >/dev/null
+      - name: Compile runner
+        run: python3 -m py_compile plugins/agent-orchestrator/scripts/cli_agent_job.py
+      - name: Run tests
+        run: python3 -m unittest discover -s plugins/agent-orchestrator/tests -v

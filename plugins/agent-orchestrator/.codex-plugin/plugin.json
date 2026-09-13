@@ -1,0 +1,31 @@
+{
+  "name": "agent-orchestrator",
+  "version": "0.2.0",
+  "description": "Delegate bounded coding tasks to local CLI agents, monitor them, and review their work from Codex.",
+  "author": {
+    "name": "Augustus Otu",
+    "url": "https://github.com/Augani"
+  },
+  "homepage": "https://github.com/Augani/agent-orchestrator",
+  "repository": "https://github.com/Augani/agent-orchestrator",
+  "license": "MIT",
+  "keywords": ["agents", "orchestration", "cli", "coding", "observability"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Orchestrator",
+    "shortDescription": "Choose a CLI, model, and agent for delegated coding.",
+    "longDescription": "Codex plans bounded work, helps users choose a CLI, model, and internal agent, runs the selection as a background job, handles clarification questions, and reviews diffs and test evidence before accepting or requesting repairs.",
+    "developerName": "Augustus Otu",
+    "category": "Productivity",
+    "capabilities": [
+      "Long-running jobs",
+      "Code delegation",
+      "Review loops"
+    ],
+    "defaultPrompt": [
+      "Help me choose a CLI and model, then delegate this task.",
+      "Run this with Grok and my chosen model, then review it.",
+      "Show available coding agents, models, and active jobs."
+    ]
+  }
+}
