@@ -6,17 +6,20 @@ Use this mode when the user wants to choose which model keeps context and which 
 
 `quality-first` keeps long-lived coordination inexpensive and spends capability on bounded work:
 
-- GPT-5.6 Luna coordinates decisions, dependencies, questions, and progress summaries.
+- Recommended task selection: GPT-5.6 Luna for decisions, dependencies, questions, and progress summaries.
 - Codex CLI with GPT-6 Astra at high reasoning effort executes one detailed capsule and exits.
 - High-risk review uses a fresh Astra context.
 
 `economy-first` spends capability on strategy and lowers routine execution cost:
 
-- GPT-6 Astra plans, decomposes, answers difficult questions, and reviews.
+- Recommended task selection: GPT-6 Astra for planning, decomposition, difficult questions, and review.
 - Codex CLI with GPT-5.6 Luna at high reasoning effort executes one detailed capsule and exits.
 
 For any other pairing, omit `--route` and pass the coordinator metadata, CLI, execution model, and
-effort independently. A route fills only missing values, so explicit user choices always win.
+effort independently. The current Codex task model is always the orchestrator. The runner cannot
+infer it and defaults coordinator metadata to `current-codex-task`. Recommendations do not change
+the current task model; only an explicit `--coordinator-model` replaces the default metadata.
+Routes fill missing executor values, so explicit user choices always win.
 
 These are routing policies, not universal cost claims. Capture usage and compare cost per accepted
 task, including retries and review.
@@ -87,7 +90,16 @@ repository files instead of pasting large source blocks.
 
 The coordinator retains compact decisions, item states, job IDs, changed files, test outcomes,
 review verdicts, and unresolved questions. Read raw output only to diagnose a specific failure.
-Observability data belongs in the dashboard, not permanently in model context.
+Observability data belongs in the dashboard, not permanently in model context. Open `dashboard-web`
+after long-running launches when helpful; it groups every workspace in the configured state home
+and refreshes every two seconds without discarding answer drafts.
+
+Use `request-feedback --workspace <workspace> --question-file <file> --json` to preserve a project
+decision outside any worker. Link `--plan-id` and optionally `--checklist-item` when appropriate.
+The user can respond in the Project orchestrator inspector, or Codex can save their actual answer
+with `answer-feedback <id> --file <file> --json`. `feedback --all --json` includes answered history.
+Worker questions remain separately scoped to their exact job. Both answer paths are durable and
+audited; never substitute an assumed answer for user input.
 
 ## Review routing
 

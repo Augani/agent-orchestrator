@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -11,6 +12,10 @@ from pathlib import Path
 
 
 RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "cli_agent_job.py"
+RUNNER_SPEC = importlib.util.spec_from_file_location("agent_orchestrator_runner", RUNNER)
+assert RUNNER_SPEC and RUNNER_SPEC.loader
+runner = importlib.util.module_from_spec(RUNNER_SPEC)
+RUNNER_SPEC.loader.exec_module(runner)
 
 
 class CliAgentJobTests(unittest.TestCase):
@@ -114,6 +119,7 @@ class CliAgentJobTests(unittest.TestCase):
                 env=env,
             )
             self.assertEqual(json.loads(waited.stdout)["state"], "succeeded")
+            self.assertEqual(json.loads(waited.stdout)["coordinator_model"], "current-codex-task")
             logs = self.run_cli("logs", job_id, "--stream", "stdout", env=env)
             self.assertIn("implement the bounded change", logs.stdout)
 
@@ -196,6 +202,31 @@ class CliAgentJobTests(unittest.TestCase):
             logs = self.run_cli("logs", job_id, "--stream", "stdout", env=env)
             self.assertIn("Use strict mode.", logs.stdout)
 
+    def test_project_feedback_cli_lifecycle_permissions_and_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "project"
+            workspace.mkdir()
+            env = {**os.environ, "AGENT_ORCHESTRATOR_HOME": str(root / "state")}
+            result = self.run_cli("request-feedback", "--workspace", str(workspace), "--question", "Which scope?", "--context", "Choose one.", "--feedback-id", "project-choice", "--no-notify", "--json", env=env)
+            record = json.loads(result.stdout)
+            self.assertEqual(record["source"], "orchestrator")
+            self.assertEqual(record["project_name"], "project")
+            path = root / "state" / "feedback" / "project-choice"
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((path / "feedback.json").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(len(json.loads(self.run_cli("feedback", "--json", env=env).stdout)), 1)
+            self.run_cli("answer-feedback", "project-choice", "--text", "Minimal scope.", "--json", env=env)
+            self.run_cli("answer-feedback", "project-choice", "--text", "Again.", env=env, expected=2)
+            self.assertEqual(json.loads(self.run_cli("feedback", "--json", env=env).stdout), [])
+            history = json.loads(self.run_cli("feedback", "--all", "--json", env=env).stdout)
+            self.assertEqual(history[0]["answer"], "Minimal scope.")
+            self.assertTrue(history[0]["answered_at"])
+            other_env = {**env, "AGENT_ORCHESTRATOR_HOME": str(root / "other-state")}
+            self.assertEqual(json.loads(self.run_cli("feedback", "--all", "--json", env=other_env).stdout), [])
+            self.run_cli("request-feedback", "--workspace", str(workspace), "--question", "Question", "--feedback-id", "../bad", "--no-notify", env=env, expected=2)
+            self.run_cli("request-feedback", "--workspace", str(workspace), "--question", "Question", "--checklist-item", "item-001", "--no-notify", env=env, expected=2)
+
     def test_unknown_placeholder_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -234,6 +265,9 @@ class CliAgentJobTests(unittest.TestCase):
             self.assertTrue(profiles["claude-code"]["supports_cli_agent"])
             routes = json.loads(self.run_cli("routes", env=env).stdout)
             self.assertEqual(routes["quality-first"]["executor"]["model"], "gpt-6-astra")
+            for route in routes.values():
+                self.assertEqual(route["coordinator"]["model"], "current-codex-task")
+                self.assertIn("recommended_task_model", route["coordinator"])
             self.assertEqual(routes["economy-first"]["executor"]["model"], "gpt-5.6-luna")
             choices = json.loads(self.run_cli("choices", "--include-unavailable", "--json", env=env).stdout)
             harness_names = {item["cli"] for item in choices["harnesses"]}
@@ -344,9 +378,20 @@ class CliAgentJobTests(unittest.TestCase):
             launch_data = json.loads(launched.stdout)
             self.assertEqual(launch_data["cli"], "codex-cli")
             self.assertEqual(launch_data["model"], "gpt-6-astra")
-            self.assertEqual(launch_data["coordinator_model"], "gpt-5.6-luna")
+            self.assertEqual(launch_data["coordinator_model"], "current-codex-task")
             self.assertEqual(launch_data["reasoning_effort"], "high")
             job_id = launch_data["job_id"]
+            job_path = (root / "state" / "jobs" / job_id).resolve()
+            metadata = json.loads((job_path / "meta.json").read_text())
+            command = metadata["command"]
+            grant = command[command.index("--add-dir") + 1]
+            self.assertEqual(grant, str(job_path / "channel"))
+            self.assertNotIn(str(job_path), command)
+            self.assertNotIn(str(root / "state"), command)
+            self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+            self.assertNotIn("danger-full-access", command)
+            self.assertTrue((job_path / "channel" / "channel.py").is_file())
+            self.assertFalse((job_path / "channel" / "meta.json").exists())
             waited = self.run_cli(
                 "wait",
                 job_id,
@@ -715,6 +760,29 @@ class CliAgentJobTests(unittest.TestCase):
             status = json.loads(waited.stdout)
             self.assertEqual(status["state"], "scope_violated")
             self.assertIn("out-of-scope path changed: outside.txt", status["scope_violations"])
+
+    def test_exact_allowlist_handles_files_in_a_new_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.name", "Test"], check=True)
+            (workspace / "seed.txt").write_text("seed\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(workspace), "add", "seed.txt"], check=True)
+            subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "seed"], check=True)
+            baseline = runner.git_snapshot(workspace)
+            new_dir = workspace / "web"
+            new_dir.mkdir()
+            (new_dir / "index.html").write_text("dashboard\n", encoding="utf-8")
+            self.assertEqual(
+                runner.scope_violations(
+                    workspace,
+                    baseline,
+                    {"allowed_paths": ["web/index.html"], "denied_paths": [], "max_changed_files": 1},
+                ),
+                [],
+            )
 
 
 if __name__ == "__main__":

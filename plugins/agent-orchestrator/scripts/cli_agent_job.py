@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fnmatch
+import fcntl
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -47,6 +49,7 @@ CHECKLIST_RE = re.compile(r"(?m)^\s*-\s+\[([ xX])\]\s+(.+?)\s*$")
 PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 ALLOWED_PLACEHOLDERS = {
     "workspace",
+    "channel_dir",
     "prompt_file",
     "prompt_text",
     "model",
@@ -64,7 +67,8 @@ BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
             "high-capability model for each bounded implementation job."
         ),
         "coordinator": {
-            "model": "gpt-5.6-luna",
+            "model": "current-codex-task",
+            "recommended_task_model": "gpt-5.6-luna",
             "responsibility": "Task decomposition, durable decisions, questions, and progress deltas.",
         },
         "executor": {
@@ -87,7 +91,8 @@ BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
             "to a lower-cost model."
         ),
         "coordinator": {
-            "model": "gpt-6-astra",
+            "model": "current-codex-task",
+            "recommended_task_model": "gpt-6-astra",
             "responsibility": "Architecture, decomposition, questions, progress, and review.",
         },
         "executor": {
@@ -205,6 +210,8 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
             "{workspace}",
             "--sandbox",
             "workspace-write",
+            "--add-dir",
+            "{channel_dir}",
             "--color",
             "never",
             "--ephemeral",
@@ -320,9 +327,15 @@ def read_json(path: Path) -> dict[str, Any]:
 def write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    temp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(temp, 0o600)
-    os.replace(temp, path)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def add_event(path: Path, event_type: str, **details: Any) -> dict[str, Any]:
@@ -336,32 +349,195 @@ def add_event(path: Path, event_type: str, **details: Any) -> dict[str, Any]:
     return event
 
 
-def read_events(path: Path, limit: int = 20) -> list[dict[str, Any]]:
-    root = path / "events"
-    if not root.exists():
+def channel_dir(path: Path) -> Path:
+    """Legacy jobs keep their original question location; new jobs use a narrow grant."""
+    return path / "channel" if (path / "channel").is_dir() else path
+
+
+def local_record_files(directory: Path) -> list[Path]:
+    # Worker-authored records must not redirect observations or answer writes through symlinks.
+    if directory.is_symlink() or directory.parent.is_symlink():
         return []
-    events: list[dict[str, Any]] = []
-    for event_path in sorted(root.glob("*.json"))[-limit:]:
+    return [item for item in directory.glob("*.json") if not item.is_symlink() and item.is_file()]
+
+
+def read_events(path: Path, limit: int = 20) -> list[dict[str, Any]]:
+    files = local_record_files(path / "events")
+    if channel_dir(path) != path:
+        files.extend(local_record_files(channel_dir(path) / "events"))
+    events = []
+    for event_path in sorted(files, key=lambda item: item.name)[-limit:]:
         try:
-            events.append(read_json(event_path))
+            event = read_json(event_path)
+            event["source"] = "worker" if (event_path.parent.parent != path or event.get("type") in {"worker_progress", "question_asked", "question_expired"}) else "runner"
+            events.append(event)
         except RunnerError:
             continue
     return events
 
 
-def pending_questions(path: Path) -> list[dict[str, Any]]:
-    root = path / "questions"
-    if not root.exists():
-        return []
-    questions: list[dict[str, Any]] = []
-    for question_path in sorted(root.glob("*.json")):
+def question_files(path: Path) -> list[Path]:
+    files = local_record_files(path / "questions")
+    if channel_dir(path) != path:
+        files.extend(local_record_files(channel_dir(path) / "questions"))
+    return sorted(files, key=lambda item: item.name)
+
+
+def read_questions(path: Path) -> list[dict[str, Any]]:
+    questions = []
+    for question_path in question_files(path):
         try:
             question = read_json(question_path)
+            if question.get("id") == question_path.stem and JOB_ID_RE.fullmatch(question_path.stem):
+                questions.append(question)
         except RunnerError:
             continue
-        if question.get("state") == "pending":
-            questions.append(question)
     return questions
+
+
+def pending_questions(path: Path) -> list[dict[str, Any]]:
+    return [question for question in read_questions(path) if question.get("state") == "pending"]
+
+
+@contextmanager
+def record_lock(path: Path):
+    """Serialize CLI and threaded HTTP transitions, including worker expiry."""
+    lock_path = path.with_suffix(".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def validate_identifier(value: str, label: str) -> str:
+    if not isinstance(value, str) or not JOB_ID_RE.fullmatch(value):
+        raise RunnerError(f"Invalid {label} ID: {value!r}")
+    return value
+
+
+def validate_answer(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise RunnerError("Answer cannot be empty")
+    if len(value.encode("utf-8")) > MAX_TASK_BYTES:
+        raise RunnerError(f"Answer exceeds {MAX_TASK_BYTES} bytes")
+    return value.strip()
+
+
+def answer_record(record_path: Path, value: str, audit_path: Path, event_type: str, **details: Any) -> dict[str, Any]:
+    value = validate_answer(value)
+    with record_lock(record_path):
+        record = read_json(record_path)
+        if record.get("state") != "pending":
+            raise RunnerError(f"Question is not pending; current state is {record.get('state')}")
+        record.update(state="answered", answer=value, answered_at=utc_now())
+        write_json(record_path, record)
+        add_event(audit_path, event_type, **details)
+    return record
+
+
+def worker_question_path(path: Path, question_id: str) -> Path:
+    validate_identifier(question_id, "question")
+    matches = [item for item in question_files(path) if item.stem == question_id]
+    if len(matches) != 1:
+        raise RunnerError(f"Unknown or ambiguous question ID: {question_id}")
+    return matches[0]
+
+
+def answer_worker_question(job_id: str, question_id: str, value: str) -> dict[str, Any]:
+    path = job_dir(job_id)
+    question_path = worker_question_path(path, question_id)
+    if read_json(question_path).get("id") != question_id:
+        raise RunnerError("Question ID does not match its record")
+    answer_record(question_path, value, path, "question_answered", question_id=question_id)
+    return {"job_id": job_id, "state": "answered", "question_id": question_id}
+
+
+def feedback_dir(feedback_id: str, must_exist: bool = True) -> Path:
+    validate_identifier(feedback_id, "feedback")
+    path = state_home() / "feedback" / feedback_id
+    if must_exist and not (path / "feedback.json").is_file():
+        raise RunnerError(f"Unknown feedback ID: {feedback_id}")
+    return path
+
+
+def read_feedback() -> list[dict[str, Any]]:
+    records = []
+    for path in sorted((state_home() / "feedback").glob("*/feedback.json")):
+        try:
+            record = read_json(path)
+            if record.get("id") == path.parent.name and JOB_ID_RE.fullmatch(path.parent.name):
+                records.append(record)
+        except RunnerError:
+            continue
+    return records
+
+
+def create_feedback(workspace: Path, question: str, context: str | None = None,
+                    plan_id: str | None = None, checklist_item: str | None = None,
+                    feedback_id: str | None = None, notify: bool = True) -> dict[str, Any]:
+    workspace = workspace.expanduser().resolve()
+    if not workspace.is_dir():
+        raise RunnerError("Workspace must be an existing directory")
+    question = validate_answer(question)
+    if context is not None and (not isinstance(context, str) or len(context.encode("utf-8")) > MAX_TASK_BYTES):
+        raise RunnerError("Context must be text of at most 1000000 bytes")
+    if checklist_item and not plan_id:
+        raise RunnerError("--checklist-item requires --plan-id")
+    if plan_id:
+        _, plan = read_plan(plan_id)
+        if Path(plan["workspace"]).resolve() != workspace:
+            raise RunnerError("Feedback workspace must match the linked plan")
+        if checklist_item and not any(item.get("id") == checklist_item for item in plan.get("items", [])):
+            raise RunnerError("Unknown checklist item")
+    selected_id = feedback_id or make_job_id("feedback")
+    path = feedback_dir(selected_id, must_exist=False)
+    # Private parents even when the configured state home has not been created yet.
+    state_home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.mkdir(exist_ok=True, mode=0o700)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise RunnerError(f"Feedback already exists: {selected_id}") from exc
+    record = {"id": selected_id, "state": "pending", "source": "orchestrator",
+              "question": question, "context": context, "workspace": str(workspace),
+              "project_name": workspace.name or "Workspace", "plan_id": plan_id,
+              "checklist_item": checklist_item, "created_at": utc_now()}
+    write_json(path / "feedback.json", record)
+    add_event(path, "feedback_requested", feedback_id=selected_id)
+    if notify:
+        notify_user("Agent Orchestrator", "The project orchestrator needs your input")
+    return record
+
+
+def answer_feedback(feedback_id: str, value: str) -> dict[str, Any]:
+    path = feedback_dir(feedback_id)
+    return answer_record(path / "feedback.json", value, path, "feedback_answered", feedback_id=feedback_id)
+
+
+def command_request_feedback(args: argparse.Namespace) -> int:
+    record = create_feedback(Path(args.workspace), question_text(args), args.context,
+                             args.plan_id, args.checklist_item, args.feedback_id, args.notify)
+    print(json.dumps(record, indent=2, sort_keys=True))
+    return 0
+
+
+def command_feedback(args: argparse.Namespace) -> int:
+    records = read_feedback()
+    if args.workspace:
+        workspace = Path(args.workspace).expanduser().resolve()
+        records = [record for record in records if Path(record["workspace"]).resolve() == workspace]
+    if not args.all:
+        records = [record for record in records if record.get("state") == "pending"]
+    print(json.dumps(records, indent=2, sort_keys=True))
+    return 0
+
+
+def command_answer_feedback(args: argparse.Namespace) -> int:
+    print(json.dumps(answer_feedback(args.feedback_id, answer_text(args)), indent=2, sort_keys=True))
+    return 0
 
 
 def notify_user(title: str, message: str) -> None:
@@ -393,6 +569,8 @@ def notify_user(title: str, message: str) -> None:
 
 
 def write_channel_wrapper(path: Path, job_id: str) -> Path:
+    path = path / "channel"
+    path.mkdir(mode=0o700)
     wrapper = path / "channel.py"
     runner = str(Path(__file__).resolve())
     content = f'''#!/usr/bin/env python3
@@ -401,6 +579,7 @@ import sys
 
 RUNNER = {runner!r}
 JOB_ID = {job_id!r}
+os.environ["AGENT_ORCHESTRATOR_HOME"] = {str(state_home())!r}
 
 if len(sys.argv) < 2 or sys.argv[1] not in {{"ask", "event"}}:
     raise SystemExit("usage: channel.py <ask|event> [arguments]")
@@ -628,7 +807,7 @@ def apply_launch_route(args: argparse.Namespace) -> dict[str, Any] | None:
         args.cli = args.cli or executor["cli"]
         args.model = args.model or executor["model"]
         args.reasoning_effort = args.reasoning_effort or executor.get("reasoning_effort")
-        args.coordinator_model = args.coordinator_model or route["coordinator"]["model"]
+    args.coordinator_model = args.coordinator_model or "current-codex-task"
     if not args.cli:
         raise RunnerError("Choose --cli or select a --route that supplies one")
     return route
@@ -656,10 +835,12 @@ def build_command(
     max_turns: int | None,
     max_cost_usd: float | None,
     reasoning_effort: str | None,
+    channel_dir: Path | None = None,
 ) -> tuple[list[str], str]:
     prompt_text = prompt_file.read_text(encoding="utf-8")
     values = {
         "workspace": str(workspace),
+        "channel_dir": str(channel_dir or prompt_file.parent / "channel"),
         "prompt_file": str(prompt_file),
         "prompt_text": prompt_text,
     }
@@ -707,7 +888,7 @@ def git_snapshot(workspace: Path) -> dict[str, Any]:
         check=False,
     )
     status = subprocess.run(
-        ["git", "-C", str(workspace), "status", "--porcelain=v1"],
+        ["git", "-C", str(workspace), "status", "--porcelain=v1", "--untracked-files=all"],
         capture_output=True,
         text=True,
         timeout=15,
@@ -875,8 +1056,7 @@ def bind_plan_item(plan_id: str, item_id: str, job_id: str) -> None:
 
 
 def job_dir(job_id: str, must_exist: bool = True) -> Path:
-    if not JOB_ID_RE.fullmatch(job_id):
-        raise RunnerError(f"Invalid job ID: {job_id!r}")
+    validate_identifier(job_id, "job")
     path = jobs_dir() / job_id
     if must_exist and not path.is_dir():
         raise RunnerError(f"Unknown job ID: {job_id}")
@@ -1366,7 +1546,9 @@ def command_launch(args: argparse.Namespace) -> int:
     path = job_dir(selected_job_id, must_exist=False)
     if path.exists():
         raise RunnerError(f"Job already exists: {selected_job_id}")
-    path.mkdir(parents=True, mode=0o700)
+    state_home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    jobs_dir().mkdir(exist_ok=True, mode=0o700)
+    path.mkdir(mode=0o700)
     original_task = path / "task-original.md"
     shutil.copyfile(task_source, original_task)
     os.chmod(original_task, 0o600)
@@ -1387,6 +1569,7 @@ def command_launch(args: argparse.Namespace) -> int:
         args.max_turns,
         args.max_cost_usd,
         args.reasoning_effort,
+        channel_path.parent,
     )
     redacted_command = ["<prompt_text>" if token == task_copy.read_text(encoding="utf-8") else token for token in command]
     meta = {
@@ -1509,6 +1692,7 @@ def command_worker(args: argparse.Namespace) -> int:
             meta.get("max_turns"),
             meta.get("max_cost_usd"),
             meta.get("reasoning_effort"),
+            channel_dir(path),
         )
         with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
             os.chmod(stdout_path, 0o600)
@@ -1640,7 +1824,7 @@ def command_logs(args: argparse.Namespace) -> int:
 
 def command_event(args: argparse.Namespace) -> int:
     path = job_dir(args.job_id)
-    event = add_event(path, "worker_progress", phase=args.phase, message=args.message)
+    event = add_event(channel_dir(path), "worker_progress", phase=args.phase, message=args.message)
     print(json.dumps(event, sort_keys=True))
     return 0
 
@@ -1666,7 +1850,7 @@ def command_ask(args: argparse.Namespace) -> int:
     path = job_dir(args.job_id)
     value = question_text(args)
     question_id = f"q-{time.time_ns()}-{secrets.token_hex(3)}"
-    question_path = path / "questions" / f"{question_id}.json"
+    question_path = channel_dir(path) / "questions" / f"{question_id}.json"
     question = {
         "id": question_id,
         "state": "pending",
@@ -1674,7 +1858,7 @@ def command_ask(args: argparse.Namespace) -> int:
         "created_at": utc_now(),
     }
     write_json(question_path, question)
-    add_event(path, "question_asked", question_id=question_id, question=value)
+    add_event(channel_dir(path), "question_asked", question_id=question_id, question=value)
     meta = read_json(path / "meta.json")
     if meta.get("notify"):
         notify_user("Agent Orchestrator", f"Job {args.job_id} needs input")
@@ -1688,24 +1872,23 @@ def command_ask(args: argparse.Namespace) -> int:
             print("Question was cancelled before an answer was provided.", file=sys.stderr)
             return 2
         time.sleep(min(1, max(0.1, deadline - time.monotonic())))
-    current = read_json(question_path)
-    if current.get("state") == "pending":
-        current.update({"state": "expired", "expired_at": utc_now()})
-        write_json(question_path, current)
-        add_event(path, "question_expired", question_id=question_id)
+    with record_lock(question_path):
+        current = read_json(question_path)
+        if current.get("state") == "answered":
+            print(current["answer"])
+            return 0
+        if current.get("state") == "pending":
+            current.update({"state": "expired", "expired_at": utc_now()})
+            write_json(question_path, current)
+            add_event(channel_dir(path), "question_expired", question_id=question_id)
     print(f"Timed out waiting for answer to {question_id}.", file=sys.stderr)
     return 2
 
 
 def command_questions(args: argparse.Namespace) -> int:
     path = job_dir(args.job_id)
-    root = path / "questions"
-    questions: list[dict[str, Any]] = []
-    if root.exists():
-        for question_path in sorted(root.glob("*.json")):
-            question = read_json(question_path)
-            if args.all or question.get("state") == "pending":
-                questions.append(question)
+    questions = [question for question in read_questions(path)
+                 if args.all or question.get("state") == "pending"]
     if args.json:
         print(json.dumps(questions, indent=2, sort_keys=True))
     else:
@@ -1730,20 +1913,7 @@ def answer_text(args: argparse.Namespace) -> str:
 
 
 def command_answer(args: argparse.Namespace) -> int:
-    path = job_dir(args.job_id)
-    if not JOB_ID_RE.fullmatch(args.question_id):
-        raise RunnerError(f"Invalid question ID: {args.question_id!r}")
-    question_path = path / "questions" / f"{args.question_id}.json"
-    if not question_path.is_file():
-        raise RunnerError(f"Unknown question ID: {args.question_id}")
-    question = read_json(question_path)
-    if question.get("state") != "pending":
-        raise RunnerError(f"Question is not pending; current state is {question.get('state')}")
-    value = answer_text(args)
-    question.update({"state": "answered", "answer": value, "answered_at": utc_now()})
-    write_json(question_path, question)
-    add_event(path, "question_answered", question_id=args.question_id)
-    print_value({"job_id": args.job_id, "state": "answered", "question_id": args.question_id}, args.json)
+    print_value(answer_worker_question(args.job_id, args.question_id, answer_text(args)), args.json)
     return 0
 
 
@@ -1900,9 +2070,12 @@ def command_cancel(args: argparse.Namespace) -> int:
     if pid_alive(child_pid):
         terminate_process_group(child_pid, force=args.force)
     for question in pending_questions(path):
-        question["state"] = "cancelled"
-        question["cancelled_at"] = utc_now()
-        write_json(path / "questions" / f"{question['id']}.json", question)
+        question_path = worker_question_path(path, question["id"])
+        with record_lock(question_path):
+            current = read_json(question_path)
+            if current.get("state") == "pending":
+                current.update(state="cancelled", cancelled_at=utc_now())
+                write_json(question_path, current)
     add_event(path, "cancellation_requested", force=args.force)
     output = {"job_id": args.job_id, "state": "cancelling", "force": args.force}
     print_value(output, args.json)
@@ -2059,6 +2232,11 @@ def command_dashboard(args: argparse.Namespace) -> int:
             time.sleep(args.interval)
     except KeyboardInterrupt:
         return 130
+
+
+def command_dashboard_web(args: argparse.Namespace) -> int:
+    from dashboard_server import serve
+    return serve(port=args.port, open_browser=not args.no_open)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2232,6 +2410,36 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--json", action="store_true")
     dashboard.set_defaults(func=command_dashboard)
 
+    web = subparsers.add_parser("dashboard-web", help="Open the private all-project web dashboard")
+    web.add_argument("--port", type=int, default=0)
+    web.add_argument("--no-open", action="store_true")
+    web.set_defaults(func=command_dashboard_web)
+
+    request = subparsers.add_parser("request-feedback", help="Request durable project orchestrator feedback")
+    request.add_argument("--workspace", default=os.getcwd())
+    request.add_argument("--question")
+    request.add_argument("--question-file")
+    request.add_argument("--context")
+    request.add_argument("--plan-id")
+    request.add_argument("--checklist-item")
+    request.add_argument("--feedback-id")
+    request.add_argument("--no-notify", dest="notify", action="store_false")
+    request.add_argument("--json", action="store_true")
+    request.set_defaults(func=command_request_feedback, notify=True)
+
+    feedback = subparsers.add_parser("feedback", help="List project feedback as JSON")
+    feedback.add_argument("--workspace")
+    feedback.add_argument("--all", action="store_true")
+    feedback.add_argument("--json", action="store_true")
+    feedback.set_defaults(func=command_feedback)
+
+    feedback_answer = subparsers.add_parser("answer-feedback", help="Answer pending orchestrator feedback")
+    feedback_answer.add_argument("feedback_id")
+    feedback_answer.add_argument("--text")
+    feedback_answer.add_argument("--file")
+    feedback_answer.add_argument("--json", action="store_true")
+    feedback_answer.set_defaults(func=command_answer_feedback)
+
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--job-dir", required=True)
     worker.set_defaults(func=command_worker)
@@ -2239,6 +2447,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_cli_args(args: argparse.Namespace) -> None:
+    if not 0 <= getattr(args, "port", 0) <= 65535:
+        raise RunnerError("port must be between 0 and 65535")
     if getattr(args, "timeout_seconds", 1) <= 0:
         raise RunnerError("timeout-seconds must be greater than zero")
     if getattr(args, "poll_seconds", 1) < 0.1:

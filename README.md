@@ -40,6 +40,8 @@ alone. [OpenAI model guidance](https://developers.openai.com/api/docs/guides/lat
 - Detached jobs with durable status, stdout/stderr logs, heartbeats, progress events, and git diff
   summaries.
 - A job-local question channel that lets a worker pause for a concrete answer without restarting.
+- A local web dashboard spanning every project, with worker questions and durable orchestrator
+  feedback answered directly in the inspector.
 - Desktop notifications for questions, completion, failure, timeout, and scope violations.
 - One-writer-per-workspace protection, dependency ordering, path allow/deny rules, and changed-file
   limits.
@@ -106,18 +108,21 @@ install the agents you use.
 
 Run `routes` to inspect the built-in policies:
 
-| Route | Coordinator | Executor | Best when |
+| Route | Recommended Codex task model | Executor | Best when |
 | --- | --- | --- | --- |
 | `quality-first` | GPT-5.6 Luna | Defaults to Codex CLI + GPT-6 Astra, high effort | You want the best bounded execution while keeping the long coordination thread inexpensive. |
 | `economy-first` | GPT-6 Astra | Defaults to Codex CLI + GPT-5.6 Luna, high effort | Architecture and review are hard, but implementation items can be specified precisely. |
 | Custom | Your choice | Any supported CLI/model/agent/effort | You want another provider or complete control over the pairing. |
 
-Routes fill only missing values. Explicit selections always win:
+The current Codex task model is always the orchestrator. Routes recommend a task model; they do
+not select or change it. Since the runner cannot infer that model, coordinator metadata defaults
+to `current-codex-task` for every route and custom launch. An explicit `--coordinator-model` always
+wins. Routes fill missing executor values only:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py routes
 
-# Luna coordinates; Astra executes.
+# Your current Codex task coordinates; Astra executes.
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --route quality-first \
   --workspace /path/to/worktree \
@@ -139,8 +144,8 @@ The route does not lock execution to Codex CLI. For example, Luna can coordinate
 Kimi Code, Grok, Devin, Gemini, DeepSeek Harness, OpenCode, or a custom adapter executes. Codex first
 presents what is actually installed, then the selected harness's available model and agent choices.
 
-The coordinator model is recorded as workflow metadata; select that model for the Codex task where
-you invoke the plugin. Model availability and billing depend on your account and provider.
+The coordinator model override is workflow metadata, not a model switch. Select the desired model
+for the Codex task itself. Model availability and billing depend on your account and provider.
 
 ## One prompt to a durable plan
 
@@ -220,8 +225,82 @@ An accepted review completes the linked checklist item. `repair_required` keeps 
 emits JSONL token or cost fields, the latest provider-reported snapshot appears in status and
 observation output; missing usage means unavailable, not zero.
 
+After acceptance, the orchestrator cleans up resources it created only for the run, such as
+temporary worktrees, disposable preview fixtures, scratch prompt/answer files, and stopped preview
+server state. It preserves user files and durable plans, job history, questions, review evidence,
+and audit events unless the user explicitly requests a purge. If ownership is uncertain, it leaves
+the resource in place and reports it.
+
 Runtime data is private to the local user and defaults to `~/.codex/agent-orchestrator/`. It is not
 part of this repository.
+
+## Local web dashboard
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web
+# Keep the browser closed and choose a port (0 asks the OS for a free port).
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web --no-open --port 0
+```
+
+The command prints its resolved `http://127.0.0.1:<port>/#token=…` URL and opens the browser by
+default. Keep this process running; Ctrl-C stops the server. The terminal `dashboard` command
+remains available. After launching long-running jobs, Codex can open this dashboard when useful.
+
+The project rail aggregates **all** workspaces represented by jobs, feedback, or durable plans in
+`AGENT_ORCHESTRATOR_HOME` (default `~/.codex/agent-orchestrator/`), regardless of current directory or
+job group. Canonical workspace paths produce stable opaque project IDs; only display names appear
+in the rail. Projects and agents needing attention come first, followed by active and recent work.
+Select a project and an agent to see current work, phase, elapsed time, review state, recent
+messages, changed files, test evidence, and available provider usage. The Files tab reports changes
+relative to the recorded baseline; Tests shows independent review evidence. Missing measurements
+are labeled unavailable rather than estimated.
+
+The dashboard refreshes every two seconds. Filtering and inspector tabs preserve the current
+selection; polling preserves focused answers and unsent drafts. **Pause refresh** pauses only the
+browser refresh, not agent execution. Select **Project orchestrator** for pending project decisions
+and answered feedback history. Worker questions appear in the selected worker's inspector. Type
+an answer and choose **Send answer** to save it durably; a waiting worker receives it without
+restarting. Concurrent or duplicate answers cannot overwrite an answered record.
+
+Coordinators can create reusable feedback separately from worker questions, even before any worker
+exists:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py request-feedback \
+  --workspace /path/to/project --question 'Which scope should the next item cover?' \
+  --context 'The current item is ready for review.' --json
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py feedback --json
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py feedback --workspace /path/to/project --all --json
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py answer-feedback <feedback-id> --file answer.md --json
+```
+
+`request-feedback` also accepts `--question-file`, optional `--plan-id` / `--checklist-item` linkage,
+and `--no-notify`. Linked plans must belong to the same workspace. Feedback records and their audit
+events live under `feedback/<id>/`, with private directories and atomic user-only record writes.
+Worker and orchestrator answers share the same validation, locking, and audited state transition.
+
+### Loopback and privacy
+
+The dependency-free server binds only to `127.0.0.1`. Every API request requires a random per-server
+capability token. The launch URL carries that token in its fragment; the browser removes it from
+the visible URL and retains it in tab-scoped session storage so reloading works. Treat the printed
+URL as private local access. A restart generates a new token. There are no external assets,
+telemetry, remote network requests, or CORS access. Host and Origin checks, a restrictive CSP,
+no-store responses, frame blocking, a static-file allowlist, ID validation, and a 64 KiB JSON-body
+limit protect the local interface. HTTP mutations accept only an answer and never a filesystem path.
+
+Only the selected job can expose short, explicitly **Local / private** log tails (up to 8 KiB per
+stream). The overview excludes task packets, commands, raw logs, and absolute workspace fields.
+Progress and question text may still contain private repository content supplied by an agent.
+This is a local user interface, not a remote service or an isolation boundary against other
+processes already running with your user account. Do not proxy or share the capability URL.
+
+New jobs put the worker wrapper and worker-authored events/questions in `jobs/<id>/channel/`.
+Codex CLI retains `--sandbox workspace-write` and receives only `--add-dir {channel_dir}` as its
+additional writable directory. Metadata, results, reviews, task packets, and runner lifecycle
+and answer-audit events stay outside that subtree. No user trust configuration is changed and no
+permission-bypass flag is used. The `{channel_dir}` placeholder is available to argv adapters;
+legacy jobs with root-level `events/` and `questions/` remain readable and answerable.
 
 ## Add another CLI
 
@@ -251,7 +330,7 @@ Adapters are argv arrays executed directly, never shell command strings. See the
 
 ```bash
 python3 -m unittest discover -s plugins/agent-orchestrator/tests -v
-python3 -m py_compile plugins/agent-orchestrator/scripts/cli_agent_job.py
+python3 -m compileall -q plugins/agent-orchestrator/scripts
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
 python3 -m json.tool plugins/agent-orchestrator/.codex-plugin/plugin.json >/dev/null
 ```

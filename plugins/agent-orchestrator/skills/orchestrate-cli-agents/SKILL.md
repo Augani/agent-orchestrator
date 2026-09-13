@@ -37,11 +37,15 @@ When model roles matter, read
 [routing and durable plans](references/routing-and-plans.md). Present the resolved flow before
 launch and let the user choose:
 
-- `quality-first`: GPT-5.6 Luna coordinates; GPT-6 Astra executes at high effort.
-- `economy-first`: GPT-6 Astra plans and reviews; GPT-5.6 Luna executes at high effort.
+- `quality-first`: recommends selecting GPT-5.6 Luna for the Codex task; GPT-6 Astra executes at high effort.
+- `economy-first`: recommends selecting GPT-6 Astra for the Codex task; GPT-5.6 Luna executes at high effort.
 - custom: pass `--coordinator-model`, `--cli`, `--model`, and `--reasoning-effort` explicitly.
 
-Explicit user choices override route defaults. Never silently substitute the opposite flow.
+The model selected for the current Codex task is always the orchestrator. The runner cannot infer
+that selection, so it records `current-codex-task` unless the user explicitly supplies
+`--coordinator-model`. Routes recommend task models but never overwrite coordinator identity or
+change the current model. Explicit user choices override executor route defaults. Never silently
+substitute the opposite flow.
 The built-in routes use Codex CLI defaults, but either route can be combined with any installed
 harness by passing explicit `--cli`, `--model`, `--cli-agent`, and `--reasoning-effort` values.
 
@@ -136,7 +140,10 @@ visible to other local processes and do not use it for sensitive repositories un
 threat model permits that exposure. Kimi Code accepts both the newer `kimi` executable name and the
 `kimi-cli` compatibility name. Its print mode is non-interactive, so use a trusted worktree, narrow
 path limits, and the review gate. Codex CLI always uses `workspace-write`; never replace it with the
-dangerous bypass option. Claude Code uses `acceptEdits`; never add a permission-bypass flag.
+dangerous bypass option. New Codex jobs grant only their per-job `channel/` subtree through
+`--add-dir {channel_dir}`. Do not grant the state or job root, edit trust configuration, or ask the
+user to trust the private state directory. Authoritative metadata, results, reviews, and lifecycle
+events stay outside that worker-writable subtree. Claude Code uses `acceptEdits`; never add a permission-bypass flag.
 
 The launch command detaches and returns a job ID. Use `status`, `logs`, or a wait capped below one
 minute so the conversation stays responsive:
@@ -151,7 +158,7 @@ Do not poll faster than every ten seconds. Relay meaningful progress, failures, 
 input, not repetitive unchanged status. Cancel only when requested, when a declared timeout is
 reached, or when continuing would violate scope or safety.
 
-Each job receives a job-local `channel.py` path in its task packet. The worker uses it to publish
+Each new job receives a `channel/channel.py` path in its task packet. The worker uses it to publish
 phase events and can ask a blocking question when ambiguity affects behavior, scope, or safety.
 `wait` returns early with `state: needs_input`; inspect and answer without restarting the agent:
 
@@ -167,10 +174,38 @@ it to the user. `channel.py event` updates are useful evidence, but they do not 
 For live observability, `observe` returns process health, heartbeat age, elapsed time, pending
 questions, recent events, log tails, and current git status/diff statistics. A user can run
 `watch <job-id>` for one worker or `dashboard --watch --group <group>` for a live multi-worker view.
-When Codex can open a terminal panel, show the dashboard there after launch. Local notifications are
+After launching long-running jobs, open the web dashboard when helpful:
+
+```bash
+python3 <runner> dashboard-web
+# Use --no-open when opening its printed URL in an available browser tool.
+python3 <runner> dashboard-web --no-open --port 0
+```
+
+Keep the server running and open its printed loopback URL, including the private token fragment.
+It aggregates every workspace in the configured state home. Project and agent selection, inspector
+tabs, and filters help focus the view; the two-second browser refresh preserves selections and
+focused answer drafts. Pause refresh only stops polling. Worker questions can be answered in the
+selected agent inspector; select Project orchestrator for project decisions and answered history.
+Use the existing terminal dashboard when a browser is not helpful. Local notifications are
 enabled by default for completion, failure, scope violations, and questions; use `--no-notify` only
 when the user asks for quiet operation. Do not expose private log content outside the task, and do
 not mistake lack of streamed prose for a stalled process when heartbeats continue.
+
+When the project orchestrator needs a user decision, create a durable feedback record instead of
+putting a question in an unrelated worker job:
+
+```bash
+python3 <runner> request-feedback --workspace <workspace> --question-file <question-file> --json
+python3 <runner> feedback --workspace <workspace> --all --json
+python3 <runner> answer-feedback <feedback-id> --file <answer-file> --json
+```
+
+Optionally link feedback with `--plan-id` and `--checklist-item` for the same workspace. Requests
+notify locally by default; `--no-notify` disables that notification. Both CLI and dashboard answers
+use the same locked, audited transition and reject second answers. Never invent a user's answer.
+The server binds only to loopback, requires its per-server token, serves no external assets, and
+shows short private logs only for a selected agent. Do not share or proxy its URL.
 
 When a CLI emits JSONL usage fields, status and observation include the latest provider-reported
 token and cost snapshot. Treat missing usage as unavailable, not zero. Keep raw logs in durable
@@ -208,6 +243,13 @@ Execution success remains `awaiting_review` until this gate is recorded. Accepta
 least one independently run test result. Dependencies cannot start until their prerequisite is
 accepted. For a plan-bound job, acceptance marks its checklist item done, a repair request keeps it
 in progress, and rejection blocks it.
+
+After the task is accepted, clean up resources created only for orchestration: stop temporary
+preview servers, remove disposable fixtures and prompt/answer scratch files, and remove temporary
+worktrees or checkouts once their reviewed changes are safely preserved. Never delete user-created
+files, the user's working tree, or durable plans, job history, review evidence, questions, and audit
+events by default. If ownership or recoverability is uncertain, preserve the resource and report it
+instead of guessing. State what was cleaned up in the final handoff.
 
 Use `cancel <job-id>` for a graceful stop. Logs and task packets can contain private repository
 content and are created with user-only permissions; do not paste them elsewhere without the user's

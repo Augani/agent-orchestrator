@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 - 2026-09-13
+
+- Add a dependency-free loopback web dashboard for all projects and jobs, with a continuous agent
+  table, inspector tabs, two-second refresh, filters, and preserved selections and answer drafts.
+- Add durable project orchestrator feedback and JSON `request-feedback`, `feedback`, and
+  `answer-feedback` commands. Answer both worker and orchestrator questions through shared locked,
+  audited transitions from the CLI or dashboard.
+- Protect the local HTTP interface with a per-server capability token, loopback Host/Origin checks,
+  strict static routes, response security headers, and bounded validated JSON mutations.
+- Default coordinator identity truthfully to `current-codex-task`; route recommendations never
+  replace the current task model or an explicit coordinator override.
+- Narrow the Codex executor write grant to each job's communication subtree with `--add-dir`,
+  retaining `workspace-write`, authoritative records outside that subtree, and legacy question reads.
+- Add an explicit post-acceptance cleanup gate for orchestrator-created temporary resources while
+  preserving user-owned files and durable audit history by default.
+
 ## 0.3.1 - 2026-09-13
 
 - Point the Codex plugin details page's Website action at the public GitHub repository.

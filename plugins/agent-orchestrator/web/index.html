@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent Orchestrator</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#project-title">Skip to project</a>
+  <div class="shell">
+    <aside class="rail" aria-label="Project navigation">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">O</span>Agent Orchestrator</div>
+      <div class="rail-current"><span>Projects</span><span id="project-count">0</span></div>
+      <div class="rail-label">PROJECTS</div>
+      <nav id="projects" aria-label="Projects"><p class="empty">Loading projects…</p></nav>
+      <footer class="rail-footer"><time id="clock"></time><div id="connection"><span class="dot blue"></span>Connecting locally</div><span class="privacy">Private · this computer only</span></footer>
+    </aside>
+    <main id="main">
+      <header class="project-header">
+        <div><h1 id="project-title" tabindex="-1">Projects</h1><p id="project-subtitle" class="muted">Connecting to your local agents…</p></div>
+        <div class="toolbar"><label class="filter-label" for="filter">Filter</label><select id="filter"><option value="all">All agents</option><option value="attention">Needs attention</option><option value="active">Active</option><option value="complete">Accepted</option></select><button id="pause" type="button" aria-pressed="false">Pause refresh</button></div>
+      </header>
+      <div id="notice" role="status" aria-live="polite"></div>
+      <section id="health" class="health" aria-label="Project health"></section>
+      <button type="button" id="orchestrator" class="feedback-link" hidden></button>
+      <div class="table-heading"><h2 id="agents-heading">Agents</h2><span id="refresh-status" class="muted">Refreshes every 2 seconds</span></div>
+      <div class="table-scroll"><table aria-labelledby="agents-heading"><colgroup><col class="agent-col"><col class="model-col"><col class="task-col"><col class="phase-col"><col class="time-col"><col class="state-col"></colgroup><thead><tr><th scope="col">Agent</th><th scope="col">Model / CLI</th><th scope="col">Current task</th><th scope="col">Phase</th><th scope="col">Elapsed</th><th scope="col">State</th></tr></thead><tbody id="agents"></tbody></table></div>
+      <p id="table-empty" class="empty" hidden>No agents match this filter.</p>
+    </main>
+    <aside class="inspector" aria-label="Selected agent inspector">
+      <header class="inspector-header"><div><h2 id="inspector-title">Select an agent</h2><p id="inspector-subtitle" class="muted">Messages and questions appear here</p></div><button id="show-messages" type="button">Messages</button></header>
+      <div class="tabs" role="tablist" aria-label="Agent details"><button type="button" role="tab" id="tab-messages" aria-controls="panel-messages" aria-selected="true" data-tab="messages">Messages</button><button type="button" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1" data-tab="files">Files</button><button type="button" role="tab" id="tab-tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1" data-tab="tests">Tests</button><button type="button" role="tab" id="tab-usage" aria-controls="panel-usage" aria-selected="false" tabindex="-1" data-tab="usage">Usage</button></div>
+      <p id="detail-status" class="muted" role="status"></p>
+      <section id="panel-messages" role="tabpanel" aria-labelledby="tab-messages"><ol id="timeline" class="timeline"></ol></section>
+      <section id="panel-files" role="tabpanel" aria-labelledby="tab-files" hidden><div id="files"></div></section>
+      <section id="panel-tests" role="tabpanel" aria-labelledby="tab-tests" hidden><div id="tests"></div></section>
+      <section id="panel-usage" role="tabpanel" aria-labelledby="tab-usage" hidden><div id="usage"></div></section>
+      <section id="questions" aria-label="Questions needing your answer"></section>
+      <section id="summary" class="summary" aria-label="Agent summary"></section>
+      <section id="history" aria-label="Answered questions"></section>
+      <details id="local-logs"><summary>Local / private log tails</summary><p class="muted">Only the selected agent’s last 8 KiB per stream. May contain private repository content.</p><h3>Standard output</h3><pre id="stdout"></pre><h3>Standard error</h3><pre id="stderr"></pre></details>
+    </aside>
+  </div>
+</body>
+</html>

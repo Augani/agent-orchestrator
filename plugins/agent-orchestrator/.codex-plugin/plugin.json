@@ -1,6 +1,6 @@
 {
   "name": "agent-orchestrator",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Route durable coding plans between user-selected coordinator and executor models, monitor jobs, and require review evidence.",
   "author": {
     "name": "Augustus Otu",
@@ -23,7 +23,9 @@
       "Code delegation",
       "Durable plans",
       "Model routing",
-      "Review gates"
+      "Review gates",
+      "Local web dashboard",
+      "Project feedback"
     ],
     "defaultPrompt": [
       "Turn this into a durable plan, then use Luna to coordinate and Astra to execute each item.",
