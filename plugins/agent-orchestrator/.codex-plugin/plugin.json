@@ -1,6 +1,6 @@
 {
   "name": "agent-orchestrator",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Route durable coding plans between user-selected coordinator and executor models, monitor jobs, and require review evidence.",
   "author": {
     "name": "Augustus Otu",
@@ -17,6 +17,7 @@
     "longDescription": "Codex turns one request into a durable plan, presents installed CLI harnesses and their model or agent choices, supports quality-first, economy-first, or custom model roles, handles clarification questions, captures usage and progress, and requires diff and test evidence before acceptance.",
     "developerName": "Augustus Otu",
     "category": "Productivity",
+    "websiteURL": "https://github.com/Augani/agent-orchestrator",
     "capabilities": [
       "Long-running jobs",
       "Code delegation",

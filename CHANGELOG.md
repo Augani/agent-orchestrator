@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-09-13
+
+- Point the Codex plugin details page's Website action at the public GitHub repository.
+
 ## 0.3.0 - 2026-09-13
 
 - Add user-selectable `quality-first` and `economy-first` coordinator/executor routes plus custom
