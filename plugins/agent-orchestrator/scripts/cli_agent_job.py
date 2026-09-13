@@ -21,6 +21,7 @@ from typing import Any
 
 
 MAX_TASK_BYTES = 1_000_000
+QUALITY_FIRST_CONTEXT_BYTES = 65_536
 REQUIRED_TASK_SECTIONS = (
     "Objective",
     "Why",
@@ -32,8 +33,17 @@ REQUIRED_TASK_SECTIONS = (
     "Validation",
     "Final report",
 )
+REQUIRED_PLAN_SECTIONS = (
+    "Goal",
+    "Decisions and assumptions",
+    "Constraints and guardrails",
+    "Checklist",
+    "Validation strategy",
+    "Completion criteria",
+)
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+CHECKLIST_RE = re.compile(r"(?m)^\s*-\s+\[([ xX])\]\s+(.+?)\s*$")
 PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 ALLOWED_PLACEHOLDERS = {
     "workspace",
@@ -43,6 +53,56 @@ ALLOWED_PLACEHOLDERS = {
     "cli_agent",
     "max_turns",
     "max_cost_usd",
+    "reasoning_effort",
+}
+
+BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
+    "quality-first": {
+        "display_name": "Quality first",
+        "description": (
+            "Keep durable orchestration with a cost-efficient coordinator and use a fresh, "
+            "high-capability model for each bounded implementation job."
+        ),
+        "coordinator": {
+            "model": "gpt-5.6-luna",
+            "responsibility": "Task decomposition, durable decisions, questions, and progress deltas.",
+        },
+        "executor": {
+            "cli": "codex-cli",
+            "model": "gpt-6-astra",
+            "reasoning_effort": "high",
+            "session": "ephemeral",
+        },
+        "review": {
+            "required": True,
+            "high_risk_model": "gpt-6-astra",
+            "policy": "Independent diff review and rerun tests before acceptance.",
+        },
+        "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
+    },
+    "economy-first": {
+        "display_name": "Economy first",
+        "description": (
+            "Use the strongest model for planning and review while delegating bounded execution "
+            "to a lower-cost model."
+        ),
+        "coordinator": {
+            "model": "gpt-6-astra",
+            "responsibility": "Architecture, decomposition, questions, progress, and review.",
+        },
+        "executor": {
+            "cli": "codex-cli",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "high",
+            "session": "ephemeral",
+        },
+        "review": {
+            "required": True,
+            "high_risk_model": "gpt-6-astra",
+            "policy": "Coordinator reviews the diff and reruns tests before acceptance.",
+        },
+        "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
+    },
 }
 
 BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
@@ -100,12 +160,14 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
             "--permission-mode",
             "acceptEdits",
             "--output-format",
-            "text",
+            "stream-json",
+            "--verbose",
         ],
         "prompt_transport": "stdin",
         "model_args": ["--model", "{model}"],
         "cli_agent_args": ["--agent", "{cli_agent}"],
         "cost_args": ["--max-budget-usd", "{max_cost_usd}"],
+        "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
     },
     "claude": {
         "display_name": "Claude Code (compatibility alias)",
@@ -119,16 +181,18 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
             "--permission-mode",
             "acceptEdits",
             "--output-format",
-            "text",
+            "stream-json",
+            "--verbose",
         ],
         "prompt_transport": "stdin",
         "model_args": ["--model", "{model}"],
         "cli_agent_args": ["--agent", "{cli_agent}"],
         "cost_args": ["--max-budget-usd", "{max_cost_usd}"],
+        "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
     },
     "codex-cli": {
         "display_name": "Codex CLI",
-        "description": "Run a lower-cost Codex model as a sandboxed implementation worker.",
+        "description": "Run the selected Codex model as a sandboxed implementation worker.",
         "maturity": "stable",
         "docs_url": "https://developers.openai.com/codex/cli/reference",
         "install_hint": "Install and authenticate Codex CLI, then ensure `codex` is on PATH.",
@@ -142,10 +206,15 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
             "--color",
             "never",
             "--ephemeral",
+            "--json",
             "-",
         ],
         "prompt_transport": "stdin",
         "model_args": ["--model", "{model}"],
+        "reasoning_effort_args": [
+            "--config",
+            "model_reasoning_effort=\"{reasoning_effort}\"",
+        ],
     },
     "kimi-code": {
         "display_name": "Kimi Code",
@@ -385,14 +454,50 @@ def validate_task_packet(text: str) -> list[str]:
     return problems
 
 
+def validate_named_sections(text: str, required_sections: tuple[str, ...]) -> list[str]:
+    matches = list(re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", text))
+    headings: list[tuple[str, int, int]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        headings.append((match.group(1).strip().casefold(), match.end(), end))
+    problems: list[str] = []
+    for required in required_sections:
+        matching = [entry for entry in headings if entry[0] == required.casefold()]
+        if not matching:
+            problems.append(f"missing section: {required}")
+        elif not text[matching[0][1] : matching[0][2]].strip():
+            problems.append(f"empty section: {required}")
+    return problems
+
+
+def task_packet_stats(text: str) -> dict[str, Any]:
+    path_mentions = sorted(
+        set(re.findall(r"(?m)(?:^|[`\s])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*/-]+)+)", text))
+    )
+    return {
+        "bytes": len(text.encode("utf-8")),
+        "lines": len(text.splitlines()),
+        "path_mentions": path_mentions[:50],
+        "path_mention_count": len(path_mentions),
+        "checklist_items": len(CHECKLIST_RE.findall(text)),
+        "code_fences": text.count("```") // 2,
+    }
+
+
 def command_validate_task(args: argparse.Namespace) -> int:
     source = Path(args.task_file).expanduser().resolve()
     if not source.is_file():
         raise RunnerError(f"Task file does not exist: {source}")
     if source.stat().st_size > MAX_TASK_BYTES:
         raise RunnerError(f"Task file exceeds {MAX_TASK_BYTES} bytes")
-    problems = validate_task_packet(source.read_text(encoding="utf-8"))
-    result = {"valid": not problems, "problems": problems, "task_file": str(source)}
+    text = source.read_text(encoding="utf-8")
+    problems = validate_task_packet(text)
+    result = {
+        "valid": not problems,
+        "problems": problems,
+        "task_file": str(source),
+        "stats": task_packet_stats(text),
+    }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if not problems else 1
 
@@ -415,6 +520,7 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "cli_agent_args",
         "max_turns_args",
         "cost_args",
+        "reasoning_effort_args",
         "models",
         "cli_agents",
         "discover_models_argv",
@@ -449,6 +555,7 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "cli_agent_args",
         "max_turns_args",
         "cost_args",
+        "reasoning_effort_args",
         "models",
         "cli_agents",
         "discover_models_argv",
@@ -463,6 +570,7 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "cli_agent_args",
         "max_turns_args",
         "cost_args",
+        "reasoning_effort_args",
         "discover_models_argv",
         "discover_cli_agents_argv",
     }
@@ -500,6 +608,28 @@ def load_profiles(custom_path: Path | None) -> dict[str, dict[str, Any]]:
     return profiles
 
 
+def resolve_route(name: str | None) -> dict[str, Any] | None:
+    if name is None:
+        return None
+    route = BUILTIN_ROUTES.get(name)
+    if not route:
+        raise RunnerError(f"Unknown route: {name}")
+    return route
+
+
+def apply_launch_route(args: argparse.Namespace) -> dict[str, Any] | None:
+    route = resolve_route(args.route)
+    if route:
+        executor = route["executor"]
+        args.cli = args.cli or executor["cli"]
+        args.model = args.model or executor["model"]
+        args.reasoning_effort = args.reasoning_effort or executor.get("reasoning_effort")
+        args.coordinator_model = args.coordinator_model or route["coordinator"]["model"]
+    if not args.cli:
+        raise RunnerError("Choose --cli or select a --route that supplies one")
+    return route
+
+
 def replace_placeholders(tokens: list[str], values: dict[str, str]) -> list[str]:
     result: list[str] = []
     for token in tokens:
@@ -521,6 +651,7 @@ def build_command(
     cli_agent: str | None,
     max_turns: int | None,
     max_cost_usd: float | None,
+    reasoning_effort: str | None,
 ) -> tuple[list[str], str]:
     prompt_text = prompt_file.read_text(encoding="utf-8")
     values = {
@@ -536,6 +667,12 @@ def build_command(
         (cli_agent, "cli_agent_args", "cli_agent", str(cli_agent) if cli_agent is not None else ""),
         (max_turns, "max_turns_args", "max_turns", str(max_turns) if max_turns is not None else ""),
         (max_cost_usd, "cost_args", "max_cost_usd", str(max_cost_usd) if max_cost_usd is not None else ""),
+        (
+            reasoning_effort,
+            "reasoning_effort_args",
+            "reasoning_effort",
+            str(reasoning_effort) if reasoning_effort is not None else "",
+        ),
     )
     for requested, profile_key, value_key, string_value in controls:
         if requested is None:
@@ -623,6 +760,116 @@ def jobs_dir() -> Path:
     return state_home() / "jobs"
 
 
+def plans_dir() -> Path:
+    return state_home() / "plans"
+
+
+def plan_dir(plan_id: str, must_exist: bool = True) -> Path:
+    if not JOB_ID_RE.fullmatch(plan_id):
+        raise RunnerError(f"Invalid plan ID: {plan_id!r}")
+    path = plans_dir() / plan_id
+    if must_exist and not path.is_dir():
+        raise RunnerError(f"Unknown plan ID: {plan_id}")
+    return path
+
+
+def plan_items(text: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": f"item-{index:03d}",
+            "title": title.strip(),
+            "state": "done" if marker.casefold() == "x" else "pending",
+            "job_ids": [],
+            "evidence": [],
+        }
+        for index, (marker, title) in enumerate(CHECKLIST_RE.findall(text), start=1)
+    ]
+
+
+def read_plan(plan_id: str) -> tuple[Path, dict[str, Any]]:
+    path = plan_dir(plan_id)
+    return path, read_json(path / "plan.json")
+
+
+def save_plan(path: Path, plan: dict[str, Any]) -> None:
+    plan["updated_at"] = utc_now()
+    counts: dict[str, int] = {}
+    for item in plan.get("items", []):
+        state = str(item.get("state", "unknown"))
+        counts[state] = counts.get(state, 0) + 1
+    plan["counts"] = counts
+    plan["complete"] = bool(plan.get("items")) and all(
+        item.get("state") == "done" for item in plan["items"]
+    )
+    write_json(path / "plan.json", plan)
+
+
+def command_create_plan(args: argparse.Namespace) -> int:
+    source = Path(args.plan_file).expanduser().resolve()
+    workspace = Path(args.workspace).expanduser().resolve()
+    if not source.is_file():
+        raise RunnerError(f"Plan file does not exist: {source}")
+    if not workspace.is_dir():
+        raise RunnerError(f"Workspace is not a directory: {workspace}")
+    if source.stat().st_size > MAX_TASK_BYTES:
+        raise RunnerError(f"Plan file exceeds {MAX_TASK_BYTES} bytes")
+    text = source.read_text(encoding="utf-8")
+    problems = validate_named_sections(text, REQUIRED_PLAN_SECTIONS)
+    items = plan_items(text)
+    if not items:
+        problems.append("Checklist must contain at least one '- [ ]' item")
+    if problems:
+        raise RunnerError("Plan is incomplete: " + "; ".join(problems))
+    selected_plan_id = args.plan_id or f"plan-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+    path = plan_dir(selected_plan_id, must_exist=False)
+    if path.exists():
+        raise RunnerError(f"Plan already exists: {selected_plan_id}")
+    path.mkdir(parents=True, mode=0o700)
+    plan_copy = path / "plan.md"
+    shutil.copyfile(source, plan_copy)
+    os.chmod(plan_copy, 0o600)
+    plan = {
+        "plan_id": selected_plan_id,
+        "title": args.title,
+        "workspace": str(workspace),
+        "created_at": utc_now(),
+        "plan_file": str(plan_copy),
+        "plan_sha256": hashlib.sha256(plan_copy.read_bytes()).hexdigest(),
+        "items": items,
+    }
+    save_plan(path, plan)
+    output = read_json(path / "plan.json")
+    print(json.dumps(output, indent=2, sort_keys=True) if args.json else selected_plan_id)
+    return 0
+
+
+def command_plan_status(args: argparse.Namespace) -> int:
+    _, plan = read_plan(args.plan_id)
+    if args.json:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+    else:
+        print(f"plan_id: {plan['plan_id']}")
+        print(f"title: {plan['title']}")
+        print(f"complete: {plan.get('complete', False)}")
+        for item in plan.get("items", []):
+            print(f"{item['id']}\t{item['state']}\t{item['title']}")
+    return 0
+
+
+def bind_plan_item(plan_id: str, item_id: str, job_id: str) -> None:
+    path, plan = read_plan(plan_id)
+    matching = [item for item in plan.get("items", []) if item.get("id") == item_id]
+    if not matching:
+        raise RunnerError(f"Unknown checklist item {item_id!r} in plan {plan_id}")
+    item = matching[0]
+    if item.get("state") == "done":
+        raise RunnerError(f"Checklist item {item_id} is already done")
+    item["state"] = "in_progress"
+    if job_id not in item["job_ids"]:
+        item["job_ids"].append(job_id)
+    save_plan(path, plan)
+
+
 def job_dir(job_id: str, must_exist: bool = True) -> Path:
     if not JOB_ID_RE.fullmatch(job_id):
         raise RunnerError(f"Invalid job ID: {job_id!r}")
@@ -642,6 +889,43 @@ def pid_alive(pid: Any) -> bool:
         return False
 
 
+def usage_summary(log_path: Path) -> dict[str, Any] | None:
+    """Extract the last provider-reported token/cost snapshot from JSONL output."""
+    if not log_path.exists():
+        return None
+    latest: dict[str, Any] | None = None
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                fields: dict[str, Any] = {}
+
+                def visit(node: Any) -> None:
+                    if isinstance(node, dict):
+                        for key, child in node.items():
+                            normalized = key.casefold()
+                            if isinstance(child, (int, float)) and not isinstance(child, bool) and (
+                                "token" in normalized
+                                or normalized in {"total_cost_usd", "cost_usd", "duration_ms"}
+                            ):
+                                fields[key] = child
+                            elif isinstance(child, (dict, list)):
+                                visit(child)
+                    elif isinstance(node, list):
+                        for child in node:
+                            visit(child)
+
+                visit(value)
+                if fields:
+                    latest = {"provider_reported": True, **fields}
+    except OSError:
+        return None
+    return latest
+
+
 def get_status(path: Path) -> dict[str, Any]:
     meta = read_json(path / "meta.json")
     result_path = path / "result.json"
@@ -652,6 +936,17 @@ def get_status(path: Path) -> dict[str, Any]:
         worker_alive = pid_alive(meta.get("worker_pid"))
         state = "cancelling" if (path / "cancel-requested").exists() and worker_alive else "running" if worker_alive else "lost"
         status = {**meta, "state": state}
+    review_path = path / "review.json"
+    review = read_json(review_path) if review_path.exists() else None
+    status["review"] = review
+    if status["state"] == "succeeded":
+        status["review_state"] = review.get("verdict") if review else "required"
+        status["acceptance_state"] = review.get("verdict") if review else "awaiting_review"
+    else:
+        status["review_state"] = review.get("verdict") if review else "not_ready"
+        status["acceptance_state"] = "not_accepted"
+    if not status.get("usage_summary"):
+        status["usage_summary"] = usage_summary(path / "stdout.log")
     questions = pending_questions(path)
     status["execution_state"] = status["state"]
     status["pending_questions"] = questions
@@ -692,9 +987,14 @@ def print_value(value: dict[str, Any], as_json: bool) -> None:
         "cli",
         "model",
         "cli_agent",
+        "route",
+        "coordinator_model",
+        "reasoning_effort",
         "group",
         "role",
         "state",
+        "review_state",
+        "acceptance_state",
         "workspace",
         "started_at",
         "finished_at",
@@ -720,12 +1020,18 @@ def command_profiles(args: argparse.Namespace) -> int:
             "supports_cli_agent": "cli_agent_args" in profile,
             "supports_max_turns": "max_turns_args" in profile,
             "supports_max_cost_usd": "cost_args" in profile,
+            "supports_reasoning_effort": "reasoning_effort_args" in profile,
             "can_discover_models": "discover_models_argv" in profile,
             "can_discover_cli_agents": "discover_cli_agents_argv" in profile,
         }
         for name, profile in sorted(profiles.items())
     }
     print(json.dumps(output, indent=2, sort_keys=True))
+    return 0
+
+
+def command_routes(args: argparse.Namespace) -> int:
+    print(json.dumps(BUILTIN_ROUTES, indent=2, sort_keys=True))
     return 0
 
 
@@ -847,6 +1153,7 @@ def command_catalog(args: argparse.Namespace) -> int:
                 "cli_agent": "cli_agent_args" in profile,
                 "max_turns": "max_turns_args" in profile,
                 "max_cost_usd": "cost_args" in profile,
+                "reasoning_effort": "reasoning_effort_args" in profile,
             },
         }
         if not args.no_discovery and item["available"]:
@@ -888,13 +1195,15 @@ def active_jobs_for_workspace(workspace: Path) -> list[str]:
 def validate_dependencies(job_ids: list[str]) -> None:
     for dependency in job_ids:
         status = get_status(job_dir(dependency))
-        if status.get("state") != "succeeded":
+        if status.get("acceptance_state") != "accepted":
             raise RunnerError(
-                f"Dependency {dependency} is {status.get('state')}; launch only after it succeeds"
+                f"Dependency {dependency} is {status.get('state')} with review "
+                f"{status.get('review_state')}; launch only after it is independently accepted"
             )
 
 
 def command_launch(args: argparse.Namespace) -> int:
+    route = apply_launch_route(args)
     workspace = Path(args.workspace).expanduser().resolve()
     task_source = Path(args.task_file).expanduser().resolve()
     if not workspace.is_dir():
@@ -904,6 +1213,13 @@ def command_launch(args: argparse.Namespace) -> int:
     if task_source.stat().st_size > MAX_TASK_BYTES:
         raise RunnerError(f"Task file exceeds {MAX_TASK_BYTES} bytes")
     task_text = task_source.read_text(encoding="utf-8")
+    task_stats = task_packet_stats(task_text)
+    if route and task_stats["bytes"] > route["context_budget_bytes"] and not args.allow_large_context:
+        raise RunnerError(
+            f"Task packet is {task_stats['bytes']} bytes, above the {route['context_budget_bytes']}-byte "
+            "quality-first context budget. Create a durable plan and split it into checklist-bound "
+            "jobs, or explicitly pass --allow-large-context."
+        )
     task_problems = validate_task_packet(task_text)
     if task_problems and not args.allow_unstructured_task:
         raise RunnerError(
@@ -920,6 +1236,15 @@ def command_launch(args: argparse.Namespace) -> int:
         candidates = ", ".join(profile.get("executable_candidates", [executable]))
         hint = f" {profile['install_hint']}" if profile.get("install_hint") else ""
         raise RunnerError(f"Executable not found on PATH (tried: {candidates}).{hint}")
+    if bool(args.plan_id) != bool(args.checklist_item):
+        raise RunnerError("--plan-id and --checklist-item must be supplied together")
+    if args.plan_id:
+        _, plan = read_plan(args.plan_id)
+        matching = [item for item in plan.get("items", []) if item.get("id") == args.checklist_item]
+        if not matching:
+            raise RunnerError(f"Unknown checklist item {args.checklist_item!r} in plan {args.plan_id}")
+        if matching[0].get("state") == "done":
+            raise RunnerError(f"Checklist item {args.checklist_item} is already done")
     validate_dependencies(args.depends_on)
     active = active_jobs_for_workspace(workspace)
     if active and not args.allow_concurrent_workspace:
@@ -948,7 +1273,14 @@ def command_launch(args: argparse.Namespace) -> int:
     os.chmod(task_copy, 0o600)
     task_sha256 = hashlib.sha256(task_copy.read_bytes()).hexdigest()
     command, transport = build_command(
-        profile, workspace, task_copy, args.model, args.cli_agent, args.max_turns, args.max_cost_usd
+        profile,
+        workspace,
+        task_copy,
+        args.model,
+        args.cli_agent,
+        args.max_turns,
+        args.max_cost_usd,
+        args.reasoning_effort,
     )
     redacted_command = ["<prompt_text>" if token == task_copy.read_text(encoding="utf-8") else token for token in command]
     meta = {
@@ -966,10 +1298,18 @@ def command_launch(args: argparse.Namespace) -> int:
         "profile": profile,
         "prompt_transport": transport,
         "model": args.model,
+        "route": args.route,
+        "coordinator_model": args.coordinator_model,
+        "reasoning_effort": args.reasoning_effort,
         "cli_agent": args.cli_agent,
         "max_turns": args.max_turns,
         "max_cost_usd": args.max_cost_usd,
         "task_sha256": task_sha256,
+        "task_stats": task_stats,
+        "context_budget_bytes": route.get("context_budget_bytes") if route else None,
+        "review_required": route.get("review", {}).get("required", True) if route else True,
+        "plan_id": args.plan_id,
+        "checklist_item": args.checklist_item,
         "scope": {
             "allowed_paths": args.allow_path,
             "denied_paths": args.deny_path,
@@ -991,7 +1331,12 @@ def command_launch(args: argparse.Namespace) -> int:
         depends_on=args.depends_on,
         task_sha256=task_sha256,
         workspace=str(workspace),
+        route=args.route,
+        plan_id=args.plan_id,
+        checklist_item=args.checklist_item,
     )
+    if args.plan_id:
+        bind_plan_item(args.plan_id, args.checklist_item, selected_job_id)
     runner_log = (path / "runner.log").open("ab", buffering=0)
     worker = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), "_worker", "--job-dir", str(path)],
@@ -1012,7 +1357,13 @@ def command_launch(args: argparse.Namespace) -> int:
         "group": args.group,
         "role": args.role,
         "model": args.model,
+        "route": args.route,
+        "coordinator_model": args.coordinator_model,
+        "reasoning_effort": args.reasoning_effort,
         "cli_agent": args.cli_agent,
+        "review_state": "required",
+        "plan_id": args.plan_id,
+        "checklist_item": args.checklist_item,
         "workspace": str(workspace),
         "job_dir": str(path),
     }
@@ -1051,6 +1402,7 @@ def command_worker(args: argparse.Namespace) -> int:
             meta.get("cli_agent"),
             meta.get("max_turns"),
             meta.get("max_cost_usd"),
+            meta.get("reasoning_effort"),
         )
         with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
             os.chmod(stdout_path, 0o600)
@@ -1116,6 +1468,7 @@ def command_worker(args: argparse.Namespace) -> int:
             stderr_handle.write(f"runner error: {type(exc).__name__}: {exc}\n".encode("utf-8", errors="replace"))
         os.chmod(stderr_path, 0o600)
     finished_at = utc_now()
+    reported_usage = usage_summary(stdout_path)
     result = {
         "state": state,
         "started_at": started_at,
@@ -1124,13 +1477,15 @@ def command_worker(args: argparse.Namespace) -> int:
         "exit_code": exit_code,
         "timed_out": timed_out,
         "scope_violations": violated_scope,
+        "usage_summary": reported_usage,
     }
     write_json(path / "result.json", result)
     meta.update(result)
     write_json(meta_path, meta)
     add_event(path, "agent_finished", state=state, exit_code=exit_code)
     if meta.get("notify"):
-        notify_user("Agent Orchestrator", f"Job {meta['job_id']} finished: {state}")
+        suffix = "; review required" if state == "succeeded" else ""
+        notify_user("Agent Orchestrator", f"Job {meta['job_id']} finished: {state}{suffix}")
     return 0 if state == "succeeded" else 1
 
 
@@ -1286,6 +1641,90 @@ def command_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+def review_notes(args: argparse.Namespace) -> str:
+    if bool(args.notes) == bool(args.notes_file):
+        raise RunnerError("Provide exactly one of --notes or --notes-file")
+    if args.notes_file:
+        source = Path(args.notes_file).expanduser().resolve()
+        if not source.is_file():
+            raise RunnerError(f"Review notes file does not exist: {source}")
+        if source.stat().st_size > MAX_TASK_BYTES:
+            raise RunnerError(f"Review notes file exceeds {MAX_TASK_BYTES} bytes")
+        return source.read_text(encoding="utf-8")
+    return args.notes
+
+
+def update_plan_after_review(meta: dict[str, Any], review: dict[str, Any]) -> None:
+    plan_id = meta.get("plan_id")
+    item_id = meta.get("checklist_item")
+    if not plan_id or not item_id:
+        return
+    path, plan = read_plan(plan_id)
+    matching = [item for item in plan.get("items", []) if item.get("id") == item_id]
+    if not matching:
+        raise RunnerError(f"Plan {plan_id} no longer contains checklist item {item_id}")
+    item = matching[0]
+    verdict = review["verdict"]
+    if verdict == "accepted":
+        item["state"] = "done"
+    elif verdict == "rejected":
+        item["state"] = "blocked"
+    else:
+        item["state"] = "in_progress"
+    item.setdefault("evidence", []).append(
+        {
+            "at": review["reviewed_at"],
+            "job_id": meta["job_id"],
+            "verdict": verdict,
+            "reviewer": review["reviewer"],
+            "tests": review["tests"],
+        }
+    )
+    was_complete = bool(plan.get("complete"))
+    save_plan(path, plan)
+    updated = read_json(path / "plan.json")
+    if updated.get("complete") and not was_complete and meta.get("notify"):
+        notify_user("Agent Orchestrator", f"Plan {plan_id} is complete")
+
+
+def command_record_review(args: argparse.Namespace) -> int:
+    path = job_dir(args.job_id)
+    meta = read_json(path / "meta.json")
+    status = get_status(path)
+    if status.get("execution_state") != "succeeded":
+        raise RunnerError(
+            f"Review can only be recorded after successful execution; current state is {status.get('execution_state')}"
+        )
+    if status.get("acceptance_state") == "accepted":
+        raise RunnerError("This job is already accepted; review evidence is immutable")
+    notes = review_notes(args)
+    if args.verdict == "accepted" and not args.test:
+        raise RunnerError("An accepted review requires at least one independently run --test result")
+    review = {
+        "review_id": f"review-{time.time_ns()}-{secrets.token_hex(3)}",
+        "job_id": args.job_id,
+        "verdict": args.verdict,
+        "reviewer": args.reviewer,
+        "reviewed_at": utc_now(),
+        "tests": args.test,
+        "notes": notes,
+    }
+    write_json(path / "reviews" / f"{review['review_id']}.json", review)
+    write_json(path / "review.json", review)
+    add_event(
+        path,
+        "review_recorded",
+        verdict=args.verdict,
+        reviewer=args.reviewer,
+        test_count=len(args.test),
+    )
+    update_plan_after_review(meta, review)
+    if meta.get("notify"):
+        notify_user("Agent Orchestrator", f"Job {args.job_id} review: {args.verdict}")
+    print(json.dumps(review, indent=2, sort_keys=True) if args.json else args.verdict)
+    return 0
+
+
 def command_observe(args: argparse.Namespace) -> int:
     path = job_dir(args.job_id)
     status = get_status(path)
@@ -1379,10 +1818,16 @@ def command_list(args: argparse.Namespace) -> int:
                                 "job_id",
                                 "cli",
                                 "model",
+                                "reasoning_effort",
+                                "route",
                                 "cli_agent",
                                 "group",
                                 "role",
                                 "state",
+                                "review_state",
+                                "acceptance_state",
+                                "plan_id",
+                                "checklist_item",
                                 "current_phase",
                                 "workspace",
                                 "created_at",
@@ -1440,8 +1885,15 @@ def dashboard_rows(group: str | None, limit: int) -> list[dict[str, Any]]:
                     "role": status.get("role"),
                     "cli": status.get("cli") or status.get("agent"),
                     "model": status.get("model"),
+                    "reasoning_effort": status.get("reasoning_effort"),
+                    "route": status.get("route"),
                     "cli_agent": status.get("cli_agent"),
                     "state": status.get("state"),
+                    "review_state": status.get("review_state"),
+                    "acceptance_state": status.get("acceptance_state"),
+                    "plan_id": status.get("plan_id"),
+                    "checklist_item": status.get("checklist_item"),
+                    "usage_summary": status.get("usage_summary"),
                     "phase": status.get("current_phase"),
                     "elapsed_seconds": elapsed_seconds(status),
                     "changed_files": len(changed),
@@ -1463,12 +1915,12 @@ def shortened(value: Any, width: int) -> str:
 
 
 def print_dashboard(rows: list[dict[str, Any]]) -> None:
-    headings = ("JOB", "GROUP", "ROLE", "CLI / MODEL / AGENT", "STATE", "PHASE", "FILES", "TIME")
-    widths = (25, 12, 16, 34, 15, 14, 5, 8)
+    headings = ("JOB", "GROUP", "ROLE", "CLI / MODEL / EFFORT", "EXECUTION", "REVIEW", "PHASE", "FILES", "TIME")
+    widths = (25, 12, 16, 34, 13, 15, 14, 5, 8)
     print("  ".join(shortened(value, width).ljust(width) for value, width in zip(headings, widths)))
     for row in rows:
         selection = " / ".join(
-            str(value) for value in (row["cli"], row["model"], row["cli_agent"]) if value
+            str(value) for value in (row["cli"], row["model"], row["reasoning_effort"]) if value
         )
         elapsed = row["elapsed_seconds"]
         elapsed_text = f"{int(elapsed)}s" if elapsed is not None else "-"
@@ -1478,6 +1930,7 @@ def print_dashboard(rows: list[dict[str, Any]]) -> None:
             row["role"],
             selection,
             row["state"],
+            row["review_state"],
             row["phase"],
             row["changed_files"],
             elapsed_text,
@@ -1510,6 +1963,9 @@ def build_parser() -> argparse.ArgumentParser:
     profiles.add_argument("--config")
     profiles.set_defaults(func=command_profiles)
 
+    routes = subparsers.add_parser("routes", help="List built-in coordinator/executor routing policies")
+    routes.set_defaults(func=command_routes)
+
     validate_task = subparsers.add_parser("validate-task", help="Validate a detailed worker task contract")
     validate_task.add_argument("--task-file", required=True)
     validate_task.set_defaults(func=command_validate_task)
@@ -1530,13 +1986,32 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config")
     doctor.set_defaults(func=command_doctor)
 
+    create_plan = subparsers.add_parser("create-plan", help="Create a durable plan and checklist ledger")
+    create_plan.add_argument("--plan-file", required=True)
+    create_plan.add_argument("--workspace", default=os.getcwd())
+    create_plan.add_argument("--title", required=True)
+    create_plan.add_argument("--plan-id")
+    create_plan.add_argument("--json", action="store_true")
+    create_plan.set_defaults(func=command_create_plan)
+
+    plan_status = subparsers.add_parser("plan-status", help="Show durable plan decisions and checklist state")
+    plan_status.add_argument("plan_id")
+    plan_status.add_argument("--json", action="store_true")
+    plan_status.set_defaults(func=command_plan_status)
+
     launch = subparsers.add_parser("launch", help="Launch a detached agent job")
-    launch.add_argument("--cli", "--agent", dest="cli", required=True)
+    launch.add_argument("--cli", "--agent", dest="cli")
+    launch.add_argument("--route", choices=tuple(sorted(BUILTIN_ROUTES)))
+    launch.add_argument("--coordinator-model")
     launch.add_argument("--workspace", default=os.getcwd())
     launch.add_argument("--task-file", required=True)
     launch.add_argument("--job-id")
     launch.add_argument("--config")
     launch.add_argument("--model")
+    launch.add_argument(
+        "--reasoning-effort",
+        choices=("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
+    )
     launch.add_argument("--cli-agent")
     launch.add_argument("--group")
     launch.add_argument("--role")
@@ -1546,10 +2021,13 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--max-changed-files", type=int)
     launch.add_argument("--max-turns", type=int)
     launch.add_argument("--max-cost-usd", type=float)
+    launch.add_argument("--plan-id")
+    launch.add_argument("--checklist-item")
     launch.add_argument("--timeout-seconds", type=int, default=3600)
     launch.add_argument("--allow-dirty", action="store_true")
     launch.add_argument("--allow-unstructured-task", action="store_true")
     launch.add_argument("--allow-concurrent-workspace", action="store_true")
+    launch.add_argument("--allow-large-context", action="store_true")
     notify = launch.add_mutually_exclusive_group()
     notify.add_argument("--notify", dest="notify", action="store_true")
     notify.add_argument("--no-notify", dest="notify", action="store_false")
@@ -1601,6 +2079,16 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("--file")
     answer.add_argument("--json", action="store_true")
     answer.set_defaults(func=command_answer)
+
+    review = subparsers.add_parser("record-review", help="Record an independent review verdict and evidence")
+    review.add_argument("job_id")
+    review.add_argument("--verdict", choices=("accepted", "repair_required", "rejected"), required=True)
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--test", action="append", default=[])
+    review.add_argument("--notes")
+    review.add_argument("--notes-file")
+    review.add_argument("--json", action="store_true")
+    review.set_defaults(func=command_record_review)
 
     observe = subparsers.add_parser("observe", help="Capture live process, log, event, and diff state")
     observe.add_argument("job_id")
@@ -1659,7 +2147,7 @@ def validate_cli_args(args: argparse.Namespace) -> None:
         raise RunnerError("limit must be greater than zero")
     if getattr(args, "max_changed_files", None) is not None and args.max_changed_files <= 0:
         raise RunnerError("max-changed-files must be greater than zero")
-    for field in ("group", "role"):
+    for field in ("group", "role", "title", "reviewer"):
         value = getattr(args, field, None)
         if value and (len(value) > 80 or any(ord(character) < 32 for character in value)):
             raise RunnerError(f"{field} must be at most 80 printable characters")

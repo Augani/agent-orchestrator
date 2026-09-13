@@ -1,12 +1,13 @@
 ---
 name: orchestrate-cli-agents
-description: Delegate bounded coding implementation to local CLI agents such as DeepSeek Harness, Kimi Code, Codex CLI, Claude Code, Devin, Grok, Gemini, or OpenCode, monitor long-running jobs, then review and repair their diffs. Use when the user asks Codex to orchestrate cheaper coding agents; do not use for ordinary in-process subagent delegation.
+description: Route durable coding plans between user-selected coordinator and executor models through local CLIs such as DeepSeek Harness, Kimi Code, Codex CLI, Claude Code, Devin, Grok, Gemini, or OpenCode, then monitor and review their diffs. Use for long-running external-agent orchestration; do not use for ordinary in-process subagent delegation.
 ---
 
 # Orchestrate CLI Agents
 
-Use Codex as the planner, authority boundary, and reviewer. Treat every external CLI agent as an
-untrusted implementation worker whose output must be inspected before it is accepted.
+Use Codex as the coordinator and durable job state as external memory. Give each implementation
+worker a bounded context capsule, then let the selected execution model implement and exit. Treat
+every worker as untrusted until its diff and tests are independently reviewed.
 
 Resolve `../../scripts/cli_agent_job.py` relative to this file and invoke it with `python3`. Job
 state is stored outside the repository under `~/.codex/agent-orchestrator/` by default. Set
@@ -30,6 +31,16 @@ any subset in natural language; preserve every explicit choice exactly.
    launch; do not silently select an expensive model.
 5. Pass the chosen values independently as `--cli`, `--model`, and `--cli-agent`. Omit a dimension
    to use that CLI's configured default. Never invent a model ID or internal-agent name.
+
+When model roles matter, read
+[routing and durable plans](references/routing-and-plans.md). Present the resolved flow before
+launch and let the user choose:
+
+- `quality-first`: GPT-5.6 Luna coordinates; GPT-6 Astra executes at high effort.
+- `economy-first`: GPT-6 Astra plans and reviews; GPT-5.6 Luna executes at high effort.
+- custom: pass `--coordinator-model`, `--cli`, `--model`, and `--reasoning-effort` explicitly.
+
+Explicit user choices override route defaults. Never silently substitute the opposite flow.
 
 ```bash
 python3 <runner> catalog --cli grok --json
@@ -59,6 +70,11 @@ python3 <runner> catalog --cli all --query fast --json
 4. Run `validate-task --task-file <packet>` before launch. Keep each packet independently
    reviewable. Split unrelated work into separate jobs.
 
+For work likely to span several bounded jobs, outlive the current context, or approach the route's
+context budget, offer to create a durable plan. If the user already requested a plan or authorized
+the complete end-to-end workflow, create it without another confirmation. The plan keeps decisions
+and checklist state outside model context; bind every executor job to one checklist item.
+
 For multiple workers, assign a short `--group` and distinct `--role` to every job. Launch independent
 roles in separate worktrees. Use `--depends-on` for ordered work; never let two jobs write the same
 workspace unless their file scopes are provably disjoint and the user accepts the risk. Pass
@@ -85,6 +101,24 @@ python3 <runner> launch \
   --timeout-seconds 7200 \
   --json
 ```
+
+For a model-routing flow:
+
+```bash
+python3 <runner> routes
+python3 <runner> launch \
+  --route quality-first \
+  --plan-id <plan-id> \
+  --checklist-item item-001 \
+  --workspace <workspace> \
+  --task-file <task-packet> \
+  --timeout-seconds 7200 \
+  --json
+```
+
+Both built-in routes reject task packets above 64 KiB by default. Prefer a durable plan and smaller
+jobs over `--allow-large-context`; use the override only when decomposition would lose correctness
+and the user accepts the context cost.
 
 Built-in CLI profiles are `deepseek-harness`, `kimi-code`, `codex-cli`, `claude-code`, `devin`,
 `grok`, `gemini`, and `opencode`. `claude` remains as a compatibility alias for `claude-code`.
@@ -135,6 +169,11 @@ enabled by default for completion, failure, scope violations, and questions; use
 when the user asks for quiet operation. Do not expose private log content outside the task, and do
 not mistake lack of streamed prose for a stalled process when heartbeats continue.
 
+When a CLI emits JSONL usage fields, status and observation include the latest provider-reported
+token and cost snapshot. Treat missing usage as unavailable, not zero. Keep raw logs in durable
+state and bring only phase changes, questions, failures, and concise usage deltas into coordinator
+context.
+
 ## Review gate
 
 Completion by the worker is not completion of the task.
@@ -150,6 +189,22 @@ Completion by the worker is not completion of the task.
    the user whether to spend more agent budget.
 6. Report what was accepted, changed, tested, and still uncertain. Never imply that a worker's
    output was reviewed when only its prose response was read.
+
+Record the verdict after review:
+
+```bash
+python3 <runner> record-review <job-id> \
+  --verdict accepted \
+  --reviewer gpt-6-astra \
+  --test 'pnpm test: passed' \
+  --notes-file <review-notes> \
+  --json
+```
+
+Execution success remains `awaiting_review` until this gate is recorded. Acceptance requires at
+least one independently run test result. Dependencies cannot start until their prerequisite is
+accepted. For a plan-bound job, acceptance marks its checklist item done, a repair request keeps it
+in progress, and rejection blocks it.
 
 Use `cancel <job-id>` for a graceful stop. Logs and task packets can contain private repository
 content and are created with user-only permissions; do not paste them elsewhere without the user's

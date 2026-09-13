@@ -26,6 +26,39 @@ class CliAgentJobTests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, result.stderr or result.stdout)
         return result
 
+    def write_structured_task(self, path: Path, extra: str = "") -> None:
+        path.write_text(
+            "\n\n".join(
+                f"# {heading}\nSpecific details for {heading}. {extra}"
+                for heading in (
+                    "Objective",
+                    "Why",
+                    "Scope",
+                    "Files to inspect",
+                    "Implementation guidance",
+                    "Constraints",
+                    "Acceptance criteria",
+                    "Validation",
+                    "Final report",
+                )
+            ),
+            encoding="utf-8",
+        )
+
+    def install_fake_codex(self, root: Path, env: dict[str, str]) -> None:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        executable = bin_dir / "codex"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,sys\n"
+            "sys.stdin.read()\n"
+            "print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 12, 'cached_input_tokens': 4, 'output_tokens': 3}, 'total_cost_usd': 0.42}))\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+
     def test_custom_file_adapter_runs_as_detached_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -197,7 +230,130 @@ class CliAgentJobTests(unittest.TestCase):
             self.assertEqual(profiles["deepseek-harness"]["maturity"], "preview")
             self.assertEqual(profiles["kimi-code"]["executable_candidates"], ["kimi", "kimi-cli"])
             self.assertTrue(profiles["codex-cli"]["supports_model"])
+            self.assertTrue(profiles["codex-cli"]["supports_reasoning_effort"])
             self.assertTrue(profiles["claude-code"]["supports_cli_agent"])
+            routes = json.loads(self.run_cli("routes", env=env).stdout)
+            self.assertEqual(routes["quality-first"]["executor"]["model"], "gpt-6-astra")
+            self.assertEqual(routes["economy-first"]["executor"]["model"], "gpt-5.6-luna")
+
+    def test_quality_route_plan_usage_and_review_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            self.write_structured_task(task)
+            plan_file = root / "plan.md"
+            plan_file.write_text(
+                "# Goal\nShip the bounded feature.\n\n"
+                "# Decisions and assumptions\nUse the public runner contract.\n\n"
+                "# Constraints and guardrails\nDo not publish or change credentials.\n\n"
+                "# Checklist\n- [ ] Implement and verify the feature.\n\n"
+                "# Validation strategy\nRun the focused unit tests.\n\n"
+                "# Completion criteria\nThe review is accepted with test evidence.\n",
+                encoding="utf-8",
+            )
+            notes = root / "review.md"
+            notes.write_text("Diff reviewed; behavior and scope match the task.\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            self.install_fake_codex(root, env)
+            created_plan = self.run_cli(
+                "create-plan",
+                "--plan-file",
+                str(plan_file),
+                "--workspace",
+                str(workspace),
+                "--title",
+                "Quality route test",
+                "--plan-id",
+                "quality-route-test",
+                "--json",
+                env=env,
+            )
+            self.assertEqual(json.loads(created_plan.stdout)["counts"], {"pending": 1})
+            launched = self.run_cli(
+                "launch",
+                "--route",
+                "quality-first",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--plan-id",
+                "quality-route-test",
+                "--checklist-item",
+                "item-001",
+                "--no-notify",
+                "--json",
+                env=env,
+            )
+            launch_data = json.loads(launched.stdout)
+            self.assertEqual(launch_data["cli"], "codex-cli")
+            self.assertEqual(launch_data["model"], "gpt-6-astra")
+            self.assertEqual(launch_data["coordinator_model"], "gpt-5.6-luna")
+            self.assertEqual(launch_data["reasoning_effort"], "high")
+            job_id = launch_data["job_id"]
+            waited = self.run_cli(
+                "wait",
+                job_id,
+                "--timeout-seconds",
+                "10",
+                "--poll-seconds",
+                "0.1",
+                "--json",
+                env=env,
+            )
+            status = json.loads(waited.stdout)
+            self.assertEqual(status["review_state"], "required")
+            self.assertEqual(status["acceptance_state"], "awaiting_review")
+            self.assertEqual(status["usage_summary"]["input_tokens"], 12)
+            self.assertEqual(status["usage_summary"]["total_cost_usd"], 0.42)
+            self.run_cli(
+                "record-review",
+                job_id,
+                "--verdict",
+                "accepted",
+                "--reviewer",
+                "gpt-6-astra",
+                "--test",
+                "python3 -m unittest: passed",
+                "--notes-file",
+                str(notes),
+                "--json",
+                env=env,
+            )
+            reviewed = self.run_cli("status", job_id, "--json", env=env)
+            self.assertEqual(json.loads(reviewed.stdout)["acceptance_state"], "accepted")
+            plan_status = self.run_cli("plan-status", "quality-route-test", "--json", env=env)
+            plan = json.loads(plan_status.stdout)
+            self.assertTrue(plan["complete"])
+            self.assertEqual(plan["items"][0]["state"], "done")
+
+    def test_quality_route_rejects_oversized_context_capsule(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            self.write_structured_task(task, "x" * 8_000)
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            self.install_fake_codex(root, env)
+            result = self.run_cli(
+                "launch",
+                "--route",
+                "quality-first",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--no-notify",
+                "--json",
+                env=env,
+                expected=2,
+            )
+            self.assertIn("Create a durable plan", result.stderr)
 
     def test_executable_candidate_fallback_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

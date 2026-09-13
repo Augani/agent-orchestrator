@@ -41,6 +41,8 @@ Each adapter accepts these fields:
   choices. Discovery commands are read-only, time-limited, and never run through a shell.
 - `max_turns_args` (optional): argv appended when `--max-turns` is supplied. Use `{max_turns}`.
 - `cost_args` (optional): argv appended when `--max-cost-usd` is supplied. Use `{max_cost_usd}`.
+- `reasoning_effort_args` (optional): argv appended when `--reasoning-effort` is supplied. Use
+  `{reasoning_effort}`. Advertise only effort values supported by that CLI and model.
 - `display_name`, `description`, `docs_url`, and `install_hint` (optional): user-facing catalog and
   diagnostic metadata. Do not include tokens, private URLs, or machine-specific paths.
 - `maturity` (optional): `stable`, `preview`, or `legacy`. Codex should prefer stable adapters unless
