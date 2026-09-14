@@ -89,9 +89,9 @@
       button.dataset.agentId = item.orchestrator ? '' : item.job_id;
       button.setAttribute('aria-current', String(selected));
       button.querySelector('.dot').className = `dot ${item.orchestrator ? questions ? 'amber' : 'neutral' : tone(item)}`;
-      button.querySelector('strong').textContent = item.orchestrator ? 'Project orchestrator' : agentName(item);
+      button.querySelector('strong').textContent = item.orchestrator ? 'Project overview' : agentName(item);
       button.querySelector('small').textContent = item.orchestrator
-        ? questions ? `${questions} project question${questions === 1 ? '' : 's'} waiting` : 'Project feedback and questions'
+        ? questions ? `${questions} project question${questions === 1 ? '' : 's'} waiting` : 'All agents, plans, and project feedback'
         : item.current_work || item.role || 'No progress update yet';
       button.querySelector('.agent-nav-status').textContent = item.orchestrator ? questions ? 'Needs answer' : 'Ready' : statusLabel(item);
       button.setAttribute('aria-label', `${button.querySelector('strong').textContent}: ${button.querySelector('.agent-nav-status').textContent}. ${button.querySelector('small').textContent}`);
@@ -99,6 +99,7 @@
   }
   function renderOverview() {
     const p = selectedProject();
+    const selected = p?.jobs.find(job => job.job_id === state.agent) || null;
     $('project-count').textContent = state.projects.length;
     reconcile($('projects'), state.projects, item => item.id, item => {
       const button = node('button', null, 'project-button'); button.type = 'button';
@@ -110,27 +111,34 @@
       button.setAttribute('aria-current', String(item.id === state.project));
       button.children[0].className = `dot ${tone(item)}`;
       button.querySelector('strong').textContent = item.name;
-      button.querySelector('small').textContent = item.attention_count ? `${item.attention_count} need attention` : `${item.active} active · ${item.jobs.length} agents`;
+      button.querySelector('small').textContent = item.question_count ? `${item.question_count} question${item.question_count === 1 ? '' : 's'} waiting` : item.active ? `${item.active} active · ${item.jobs.length} agents` : `${item.jobs.length} agents · history`;
       button.querySelector('.count').textContent = item.jobs.length;
       button.title = `${item.name} · ${item.id}`;
     });
     renderAgentNavigation(p);
-    $('project-title').textContent = p ? p.name : 'Your projects';
-    $('project-subtitle').textContent = p ? `${p.jobs.length} agents · ${p.plans.length} plans · Updated ${ago(p.updated_at).toLowerCase()}` : 'Jobs and project feedback appear here when created.';
+    $('project-title').textContent = selected ? agentName(selected) : p ? p.name : 'Your projects';
+    $('project-subtitle').textContent = selected
+      ? `${selected.current_work || selected.role || 'Agent work'} · ${p.name}`
+      : p ? `${p.jobs.length} agents · ${p.plans.length} plans · Updated ${ago(p.updated_at).toLowerCase()}` : 'Jobs and project feedback appear here when created.';
+    $('filter').disabled = Boolean(selected);
     const health = $('health'); health.replaceChildren();
-    if (p) {
-      const healthMetric = metric('Overall health', p.attention_required ? 'Needs attention' : p.active ? 'In progress' : p.completed ? 'Reviewed' : 'No active jobs', `${p.active} active · ${p.attention_count} need attention`);
+    if (selected) {
+      const statusMetric = metric('Agent status', statusLabel(selected), selected.role || 'Worker');
+      statusMetric.querySelector('strong').prepend(dot(tone(selected)));
+      health.append(statusMetric, metric('Current phase', label(selected.phase), selected.recent_message ? 'Progress reported' : 'No progress update'), metric('Elapsed', elapsed(selected.elapsed_seconds), selected.active ? 'Still running' : 'Latest run'), metric('Files changed', count(selected.changed_files), 'From recorded baseline'));
+    } else if (p) {
+      const healthMetric = metric('Overall health', p.attention_required ? 'Question waiting' : p.active ? 'In progress' : p.completed ? 'History available' : 'No active jobs', `${p.active} active · ${p.question_count} questions`);
       healthMetric.querySelector('strong').prepend(dot(tone(p)));
       const total = p.jobs.length;
       const progressMetric = metric('Review progress', total ? `${Math.round(p.completed / total * 100)}%` : '—', `${p.completed} of ${total} agents accepted`);
       const progress = node('progress'); progress.max = total || 1; progress.value = p.completed; progress.setAttribute('aria-label', 'Agents accepted after review');
       progressMetric.querySelector('strong').after(progress);
-      health.append(healthMetric, progressMetric, metric('Latest activity', ago(p.updated_at), 'Local durable state'), metric('Questions', count(p.pending_feedback.length + p.jobs.reduce((sum, j) => sum + j.pending_questions.length, 0)), 'Worker + orchestrator'));
+      health.append(healthMetric, progressMetric, metric('Latest activity', ago(p.updated_at), 'Local durable state'), metric('Review queue', count(p.review_queue), `${p.failed} failed or scope-violating runs in history`));
     }
-    const rows = p ? p.jobs.filter(j => state.filter === 'all' || state.filter === 'attention' && j.attention_required || state.filter === 'active' && j.active || state.filter === 'complete' && j.state === 'accepted') : [];
-    $('agents-heading').textContent = `Agents (${rows.length})`;
+    const rows = selected ? [selected] : p ? p.jobs.filter(j => state.filter === 'all' || state.filter === 'attention' && j.attention_required || state.filter === 'active' && j.active || state.filter === 'complete' && j.state === 'accepted') : [];
+    $('agents-heading').textContent = selected ? 'Selected agent work' : `Agents (${rows.length})`;
     $('table-empty').hidden = rows.length > 0;
-    $('table-empty').textContent = !p ? 'No projects yet. Launch a job or request project feedback to get started.' : p.jobs.length ? 'No agents match this filter.' : 'No worker jobs in this project. Select project orchestrator to review its feedback.';
+    $('table-empty').textContent = !p ? 'No projects yet. Launch a job or request project feedback to get started.' : p.jobs.length ? 'No agents match this filter.' : 'No worker jobs in this project. Select Project overview to review its feedback.';
     reconcile($('agents'), rows, j => j.job_id, j => {
       const row = node('tr');
       for (let i = 0; i < 6; i++) row.append(node('td'));
@@ -159,7 +167,7 @@
     $('notice').textContent = '';
     state.project = id;
     const p = selectedProject();
-    state.agent = p.pending_feedback.length ? null : p.jobs[0]?.job_id || null;
+    state.agent = null;
     state.feedback = []; clearInspector(); renderOverview(); loadDetail();
   }
   function selectAgent(id) {
@@ -309,7 +317,7 @@
       const data = await api('/api/overview'); state.projects = data.projects;
       if (!selectedProject()) {
         state.project = state.projects[0]?.id || null;
-        const p = selectedProject(); state.agent = p?.pending_feedback.length ? null : p?.jobs[0]?.job_id || null;
+        state.agent = null;
         clearInspector();
       } else if (state.agent && !selectedProject().jobs.some(j => j.job_id === state.agent)) {
         state.agent = null; clearInspector();
