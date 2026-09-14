@@ -52,10 +52,15 @@ completion events, the dashboard, and notifications instead of tight polling.
 - Desktop notifications for questions, completion, failure, timeout, and scope violations.
 - One-writer-per-workspace protection, dependency ordering, path allow/deny rules, and changed-file
   limits.
+- A persistent workspace preference: isolated worktrees by default, or the existing project
+  checkout when the user opts out of worktrees for space or workflow reasons.
 - Durable plans with decision records, checklist-bound jobs, resumable progress, and completion
   evidence.
 - Automatic intent routing with a cost-first default, quality-first Sol/Opus execution, explicit
   maximum-quality Astra authorization, risk-based reasoning effort, and exact durable allowlists.
+- Evidence-aware candidate ranking by task type, using versioned public benchmark/model sources as
+  priors and reviewed local acceptance, repair, execution-failure, and scope-failure history as the
+  stronger signal once enough samples exist.
 - Compact goal checkpoints and 24-hour outcome/usage metrics for evidence-based routing without
   replaying the full coordinator transcript.
 - Fail-closed executor pools: every launch must match the plan's resolved or user-selected exact
@@ -178,6 +183,20 @@ for the Codex task itself. Model availability and billing depend on your account
 Using Astra for planning or review does not approve it for implementation. Only an explicit
 `maximum-quality` plan or explicit expensive executor selection does.
 
+Workspace isolation is also user-controlled and remembered locally:
+
+```bash
+# Opt out of extra worktrees for this and future orchestrations.
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py preferences \
+  --workspace-mode project
+
+# Restore isolated worktrees later.
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py preferences \
+  --workspace-mode worktree
+```
+
+Project mode does not weaken writer locks, dirty-worktree baselines, scope limits, or review gates.
+
 ## Resolve and lock the executor pool
 
 When the user invokes Agent Orchestrator without naming an executor, the default is automatic
@@ -191,11 +210,31 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
   --plan-file /path/to/plan.md \
   --strategy quality-first \
   --risk high \
+  --task-type security \
   --json
 ```
 
 The plan records every installed CLI/model choice, rank, effort, rationale, and authorization
-source. If the user names a custom set, persist exactly that set instead:
+source. To rank a discovered cross-harness candidate set before locking it:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py recommend-executors \
+  --strategy quality-first \
+  --risk high \
+  --task-type debugging \
+  --candidate 'codex-cli=gpt-5.6-sol' \
+  --candidate 'devin=swe-2' \
+  --candidate 'grok=grok-4.6' \
+  --json
+```
+
+The bundled evidence catalog links to SWE-bench, Terminal-Bench, LiveCodeBench, Aider, and official
+provider model catalogs. Its capability tiers are transparent routing heuristics—not fabricated
+benchmark scores—and every output names the evidence date and sources. Task-specific local history
+changes ordering only after three independently reviewed jobs; overall history needs five. Explicit
+user selections and the no-silent-Astra rule always win.
+
+If the user names a custom set, persist exactly that set instead:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
@@ -203,14 +242,14 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
   --workspace /path/to/project \
   --plan-file /path/to/plan.md \
   --executor 'devin=swe-2' \
-  --executor 'grok=grok-code-fast-1' \
+  --executor 'grok=grok-4.6' \
   --executor 'opencode' \
   --terra-fallback-after-seconds 900 \
   --json
 
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py set-executors <plan-id> \
   --executor 'devin=swe-2' \
-  --executor 'grok=grok-code-fast-1' \
+  --executor 'grok=grok-4.6' \
   --terra-fallback-after-seconds 900 \
   --json
 ```
@@ -376,10 +415,14 @@ private local server when needed, opens it, and otherwise reuses the healthy ser
 the current state home. This avoids duplicate dashboards while keeping all projects visible.
 `dashboard-web` remains available for foreground operation; Ctrl-C stops that server.
 
-The project rail aggregates **all** workspaces represented by jobs, feedback, or durable plans in
+The fixed project rail aggregates **all** repositories represented by jobs, feedback, or durable plans in
 `AGENT_ORCHESTRATOR_HOME` (default `~/.codex/agent-orchestrator/`), regardless of current directory or
-job group. Canonical workspace paths produce stable opaque project IDs; only display names appear
-in the rail. Projects and agents needing attention come first, followed by active and recent work.
+job group. A main checkout and all of its linked Git worktrees collapse into one project entry;
+the selected project's workers appear in a separate inner Agents rail. Only unanswered user
+questions create a project-level attention alert, so historical failures and unreviewed runs do not
+turn an old project into a permanent alarm. Select an inner agent and the center switches to that
+agent's work alone; select **Project overview** to return to the full project history.
+
 Select a project and an agent to see current work, phase, elapsed time, review state, recent
 messages, changed files, test evidence, and available provider usage. The Files tab reports changes
 relative to the recorded baseline; Tests shows independent review evidence. Missing measurements
@@ -387,7 +430,7 @@ are labeled unavailable rather than estimated.
 
 The dashboard refreshes every two seconds. Filtering and inspector tabs preserve the current
 selection; polling preserves focused answers and unsent drafts. **Pause refresh** pauses only the
-browser refresh, not agent execution. Select **Project orchestrator** for pending project decisions
+browser refresh, not agent execution. Select **Project overview** for pending project decisions
 and answered feedback history. Worker questions appear in the selected worker's inspector. Type
 an answer and choose **Send answer** to save it durably; a waiting worker receives it without
 restarting. Concurrent or duplicate answers cannot overwrite an answered record.

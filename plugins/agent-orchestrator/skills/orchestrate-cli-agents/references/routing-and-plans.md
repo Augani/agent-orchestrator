@@ -40,6 +40,20 @@ one-off approval. Planning or review model selection never grants implementation
 These are routing policies, not universal cost claims. Capture usage and compare cost per accepted
 task, including retries and review.
 
+## Evidence-aware model choice
+
+Classify each item by task type and run `recommend-executors` before fixing its order. The router
+uses the versioned `model-evidence.json` catalog as a qualitative prior, then incorporates durable
+local outcomes for the exact CLI/model pair. Public benchmark results are harness-dependent and do
+not prove that a model will perform equally in another CLI. Prefer task-specific reviewed history
+after three samples and overall reviewed history after five; below those thresholds, report low
+confidence and retain the policy order.
+
+For CLIs with multiple models, discover exact current IDs first and pass them as repeated
+`--candidate CLI=MODEL` values. Never infer current availability from an old successful job. The
+recommendation can reorder eligible candidates, but cannot widen the user's pool, select an
+uninstalled CLI, or admit Astra outside `maximum-quality`.
+
 ## Durable plan and goal
 
 Create a plan for every Agent Orchestrator run. The top-level goal and checklist are its external
@@ -84,6 +98,7 @@ python3 <runner> create-plan \
   --plan-file <plan.md> \
   --strategy cost-first \
   --risk medium \
+  --task-type backend \
   --json
 python3 <runner> plan-status <plan-id> --json
 python3 <runner> plan-checkpoint <plan-id> --json

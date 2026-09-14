@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-09-14",
+  "methodology": "Qualitative capability priors derived from official model descriptions and public coding-agent benchmark families. Numeric tiers are routing heuristics, not claimed benchmark scores. Reviewed local outcomes override these priors only after a minimum sample size.",
+  "sources": [
+    {
+      "id": "swe-bench",
+      "name": "SWE-bench leaderboards",
+      "url": "https://www.swebench.com/",
+      "use": "Repository issue resolution; results are harness-dependent."
+    },
+    {
+      "id": "terminal-bench",
+      "name": "Terminal-Bench leaderboard",
+      "url": "https://www.tbench.ai/leaderboard",
+      "use": "End-to-end terminal agent capability."
+    },
+    {
+      "id": "livecodebench",
+      "name": "LiveCodeBench",
+      "url": "https://github.com/livecodebench/livecodebench",
+      "use": "Continuously updated, contamination-aware code generation and repair."
+    },
+    {
+      "id": "aider",
+      "name": "Aider polyglot leaderboard data",
+      "url": "https://github.com/Aider-AI/aider/blob/main/aider/website/_data/polyglot_leaderboard.yml",
+      "use": "Code-editing performance across languages."
+    },
+    {
+      "id": "openai-models",
+      "name": "OpenAI model catalog",
+      "url": "https://developers.openai.com/api/docs/models",
+      "use": "Current OpenAI model positioning and capabilities."
+    },
+    {
+      "id": "anthropic-models",
+      "name": "Anthropic model lifecycle documentation",
+      "url": "https://docs.anthropic.com/en/docs/about-claude/model-deprecations",
+      "use": "Current Claude model identifiers and lifecycle."
+    },
+    {
+      "id": "xai-models",
+      "name": "xAI model catalog",
+      "url": "https://docs.x.ai/developers/models",
+      "use": "Current Grok model positioning and capabilities."
+    },
+    {
+      "id": "glm-models",
+      "name": "Z.ai GLM-5 documentation",
+      "url": "https://docs.z.ai/guides/llm/glm-5",
+      "use": "Vendor-published GLM coding-agent evidence; treated as vendor evidence."
+    }
+  ],
+  "priors": [
+    {
+      "contains": ["gpt-6-astra", "opus"],
+      "capability_tier": 5,
+      "strengths": ["general", "backend", "debugging", "security", "performance", "migration"],
+      "sources": ["swe-bench", "terminal-bench", "openai-models", "anthropic-models"]
+    },
+    {
+      "contains": ["gpt-5.6-sol", "grok-4.6"],
+      "capability_tier": 4,
+      "strengths": ["general", "backend", "debugging", "tests", "performance"],
+      "sources": ["swe-bench", "terminal-bench", "livecodebench", "openai-models", "xai-models"]
+    },
+    {
+      "contains": ["gpt-5.6-terra", "glm-5", "swe-2", "sonnet", "gemini", "kimi"],
+      "capability_tier": 3,
+      "strengths": ["general", "frontend", "backend", "tests", "documentation"],
+      "sources": ["swe-bench", "terminal-bench", "livecodebench", "aider", "openai-models", "glm-models"]
+    },
+    {
+      "contains": ["gpt-5.6-luna", "fable", "muse"],
+      "capability_tier": 2,
+      "strengths": ["general", "frontend", "tests", "documentation"],
+      "sources": ["livecodebench", "aider", "openai-models", "anthropic-models"]
+    }
+  ]
+}

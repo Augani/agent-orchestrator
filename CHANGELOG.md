@@ -2,6 +2,13 @@
 
 ## 0.6.0 - 2026-09-14
 
+- Group linked worktree jobs under their canonical repository in the dashboard, add a selected
+  project's inner agent navigation, and reserve project alerts for questions requiring user input.
+- Remember an explicit opt-out from Git worktrees and capture the selected workspace mode in every
+  new durable plan.
+- Add task-type-aware executor recommendations that combine transparent, versioned public
+  benchmark/model priors with minimum-sample reviewed local outcomes while preserving user pools
+  and the explicit Astra boundary.
 - Add automatic intent routing: `cost-first` by default, `quality-first` for explicit
   quality-over-cost requests, and `maximum-quality` only for explicit frontier authorization.
 - Let quality-first plans automatically use installed GPT-5.6 Sol and Claude Opus executors while

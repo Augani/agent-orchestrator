@@ -53,6 +53,16 @@ public APIs, cross-module invariants, or irreversible behavior. Pass the classif
 `create-plan`; the runner records the exact model, rank, reasoning effort, rationale, and source of
 authorization. The automatic pool only includes installed built-in harnesses.
 
+Also classify the bounded work as `frontend`, `backend`, `debugging`, `tests`, `security`,
+`migration`, `performance`, `documentation`, or `general`. Before locking the pool, run
+`recommend-executors --strategy <strategy> --risk <risk> --task-type <type> --json`. If the user
+named or discovered candidates, pass each exact `CLI=MODEL` as `--candidate` (or
+`--expensive-candidate` when separately authorized). The router combines versioned public coding
+benchmark/model evidence with reviewed local acceptance, repair, scope-failure, and execution
+history. Treat public results as harness-dependent priors. Task-specific local results influence
+ordering after three reviewed jobs; overall local history after five. Sparse, stale, or unreviewed
+history must not override an explicit user choice or the Astra authorization boundary.
+
 Run `choices --json` once to learn what is installed. Use `catalog --cli <name>` when the user names
 a harness, or `catalog --cli all --query <name>` when they name a model/agent without a harness.
 Ask a compact question only when an explicit choice is ambiguous, no automatic candidate is
@@ -63,8 +73,8 @@ the harness supports explicit model selection.
 For an explicit custom pool, persist ordinary entries with repeated `--executor CLI=MODEL` and
 explicitly approved Astra, Fable, Opus, or other frontier entries with
 `--expensive-executor CLI=MODEL`. For an inferred policy, omit both executor flags and use
-`--strategy` plus `--risk`; `quality-first` itself records authorization for Sol/Opus, while only
-`maximum-quality` records authorization for Astra.
+`--strategy`, `--risk`, plus `--task-type`; `quality-first` itself records authorization for
+Sol/Opus, while only `maximum-quality` records authorization for Astra.
 
 When model roles matter, read
 [routing and durable plans](references/routing-and-plans.md). The runner records
@@ -83,9 +93,14 @@ python3 <runner> catalog --cli all --query fast --json
 1. Read the repository instructions and the actual files needed to define a bounded task. Inspect
    relevant symbols, callers, tests, and public contracts before writing the worker prompt. Do not
    ask a weaker worker to rediscover context Codex can state directly.
-2. Inspect `git status`. Prefer a clean dedicated worktree for isolated work. If using a dirty
+2. Read `preferences --json`, then inspect `git status`. The default `workspace_mode` is
+   `worktree`, so prefer a clean dedicated worktree for isolated work. If the user says they do not
+   want worktrees (including because of disk space), immediately persist that choice with
+   `preferences --workspace-mode project`; use the project's existing checkout for this and future
+   runs. Do not silently create a worktree while that preference is active. If using a dirty
    checkout is intentional, record the baseline and pass `--allow-dirty`; never attribute the
-   user's pre-existing changes to the worker.
+   user's pre-existing changes to the worker. Save `worktree` again only when the user asks to
+   restore isolated worktrees.
 3. Write one detailed task contract using [the required task contract](references/task-contract.md).
    Explain what to change, how to approach it, and why each constraint exists. Name exact files,
    symbols, callers, tests, and public exports where known. Include:

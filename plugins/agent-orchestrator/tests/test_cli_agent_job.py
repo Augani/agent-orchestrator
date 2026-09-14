@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "cli_agent_job.py"
@@ -393,6 +394,52 @@ class CliAgentJobTests(unittest.TestCase):
             )
             canonical_names = {item["cli"] for item in canonical_choices["harnesses"]}
             self.assertNotIn("claude", canonical_names)
+
+    def test_workspace_preference_is_persistent_and_captured_by_new_plans(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            plan_file = root / "plan.md"
+            self.write_plan(plan_file)
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            default = json.loads(self.run_cli("preferences", "--json", env=env).stdout)
+            self.assertEqual(default["workspace_mode"], "worktree")
+            saved = json.loads(
+                self.run_cli(
+                    "preferences",
+                    "--workspace-mode",
+                    "project",
+                    "--json",
+                    env=env,
+                ).stdout
+            )
+            self.assertEqual(saved["workspace_mode"], "project")
+            self.assertEqual(
+                json.loads((root / "state" / "preferences.json").read_text())[
+                    "workspace_mode"
+                ],
+                "project",
+            )
+            created = json.loads(
+                self.run_cli(
+                    "create-plan",
+                    "--plan-file",
+                    str(plan_file),
+                    "--workspace",
+                    str(workspace),
+                    "--title",
+                    "No worktree plan",
+                    "--plan-id",
+                    "no-worktree-plan",
+                    "--executor",
+                    "codex-cli=gpt-5.6-terra",
+                    "--json",
+                    env=env,
+                ).stdout
+            )
+            self.assertEqual(created["workspace_mode"], "project")
 
     def test_antigravity_uses_sandboxed_jsonl_stdin_and_pinned_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1020,6 +1067,8 @@ class CliAgentJobTests(unittest.TestCase):
                 "quality-first",
                 "--risk",
                 "high",
+                "--task-type",
+                "debugging",
                 "--json",
                 env=env,
             )
@@ -1033,10 +1082,15 @@ class CliAgentJobTests(unittest.TestCase):
                 set(quality_models).issubset({"gpt-5.6-sol", "opus", "gpt-5.6-terra"})
             )
             self.assertNotIn("gpt-6-astra", quality_models)
+            self.assertEqual(quality_plan["goal"]["task_type"], "debugging")
+            self.assertTrue(
+                quality_plan["executor_policy"]["routing_evidence"]["sources"]
+            )
             self.assertEqual(
                 quality_plan["executor_policy"]["allowed"][0]["reasoning_effort"],
                 "xhigh",
             )
+
             self.assertEqual(
                 quality_plan["goal"]["objective"],
                 "Ship the bounded feature with review evidence.",
@@ -1064,6 +1118,40 @@ class CliAgentJobTests(unittest.TestCase):
             self.assertTrue(
                 maximum_plan["executor_policy"]["allowed"][0]["expensive_user_approved"]
             )
+
+    def test_model_router_uses_task_evidence_and_reviewed_local_outcomes(self) -> None:
+        candidates = [
+            {
+                "cli": "codex-cli",
+                "model": "gpt-5.6-terra",
+                "display": "codex-cli=gpt-5.6-terra",
+            },
+            {
+                "cli": "codex-cli",
+                "model": "gpt-5.6-luna",
+                "display": "codex-cli=gpt-5.6-luna",
+            },
+        ]
+
+        def outcomes(_cli, model, _task_type):
+            rate = 0.2 if model == "gpt-5.6-terra" else 1.0
+            sample = {
+                "attempts": 5,
+                "reviewed": 5,
+                "accepted": round(rate * 5),
+                "reviewed_acceptance_rate": rate,
+                "execution_failure_rate": 0.0,
+            }
+            return {"task": sample, "overall": sample}
+
+        with mock.patch.object(runner, "local_executor_outcomes", side_effect=outcomes):
+            ranked, evidence = runner.rank_executor_candidates(
+                candidates, "cost-first", "medium", "backend"
+            )
+        self.assertEqual(ranked[0]["model"], "gpt-5.6-luna")
+        self.assertEqual(ranked[0]["evidence_basis"], "task_specific_reviewed_history")
+        self.assertTrue(ranked[0]["benchmark_sources"])
+        self.assertEqual(evidence["minimum_task_specific_reviewed_jobs"], 3)
 
     def test_default_cost_plan_inherits_effort_and_exposes_compact_checkpoint_metrics(
         self,

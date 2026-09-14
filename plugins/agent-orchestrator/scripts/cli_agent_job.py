@@ -65,6 +65,25 @@ EXPENSIVE_EXECUTOR_MARKERS = ("astra", "fable", "opus")
 DEFAULT_EXECUTOR_LABEL = "<configured-default>"
 STRATEGIES = ("cost-first", "quality-first", "maximum-quality")
 RISKS = ("low", "medium", "high")
+WORKSPACE_MODES = ("worktree", "project")
+TASK_TYPES = (
+    "general",
+    "frontend",
+    "backend",
+    "debugging",
+    "tests",
+    "security",
+    "migration",
+    "performance",
+    "documentation",
+)
+MODEL_EVIDENCE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "orchestrate-cli-agents"
+    / "references"
+    / "model-evidence.json"
+)
 
 AUTO_EXECUTOR_CANDIDATES: dict[str, list[dict[str, Any]]] = {
     "cost-first": [
@@ -448,6 +467,28 @@ def config_path(value: str | None) -> Path:
     if value:
         return Path(value).expanduser().resolve()
     return Path.home() / ".config" / "agent-orchestrator" / "agents.json"
+
+
+def preferences_path() -> Path:
+    return state_home() / "preferences.json"
+
+
+def load_preferences() -> dict[str, str]:
+    path = preferences_path()
+    if not path.is_file():
+        return {"workspace_mode": "worktree"}
+    value = read_json(path)
+    mode = value.get("workspace_mode")
+    if mode not in WORKSPACE_MODES:
+        raise RunnerError("preferences.json has an invalid workspace_mode")
+    return {"workspace_mode": mode}
+
+
+def save_preferences(preferences: dict[str, str]) -> None:
+    path = preferences_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    write_json(path, preferences)
+    os.chmod(path, 0o600)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -1128,20 +1169,180 @@ def executor_policy(
     }
 
 
+def load_model_evidence() -> dict[str, Any]:
+    evidence = read_json(MODEL_EVIDENCE_PATH)
+    if evidence.get("schema_version") != 1:
+        raise RunnerError("Unsupported model evidence schema")
+    if not isinstance(evidence.get("sources"), list) or not isinstance(
+        evidence.get("priors"), list
+    ):
+        raise RunnerError("Model evidence requires sources and priors arrays")
+    return evidence
+
+
+def evidence_prior(model: str | None, evidence: dict[str, Any]) -> dict[str, Any]:
+    normalized = (model or DEFAULT_EXECUTOR_LABEL).casefold()
+    for prior in evidence["priors"]:
+        markers = prior.get("contains", [])
+        if isinstance(markers, list) and any(
+            isinstance(marker, str) and marker.casefold() in normalized
+            for marker in markers
+        ):
+            return prior
+    return {"capability_tier": 1, "strengths": ["general"], "sources": []}
+
+
+def inferred_task_type(status: dict[str, Any]) -> str:
+    explicit = status.get("task_type")
+    if explicit in TASK_TYPES:
+        return explicit
+    text = " ".join(
+        str(status.get(key) or "")
+        for key in ("role", "checklist_item", "current_phase")
+    ).casefold()
+    keywords = {
+        "security": ("security", "auth", "permission", "credential", "vulnerability"),
+        "performance": ("performance", "latency", "optimizer", "benchmark", "profil"),
+        "migration": ("migration", "migrate", "upgrade", "port"),
+        "debugging": ("debug", "diagnos", "repair", "fix", "regression"),
+        "tests": ("test", "coverage", "fixture", "reviewer", "audit"),
+        "frontend": ("frontend", "dashboard", "ui", "css", "react", "swiftui"),
+        "backend": ("backend", "api", "database", "worker", "server", "runtime"),
+        "documentation": ("docs", "documentation", "readme", "article"),
+    }
+    for task_type, markers in keywords.items():
+        if any(marker in text for marker in markers):
+            return task_type
+    return "general"
+
+
+def local_executor_outcomes(
+    cli: str, model: str | None, task_type: str, since_days: float = 90
+) -> dict[str, Any]:
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=since_days)
+    matching: list[dict[str, Any]] = []
+    overall: list[dict[str, Any]] = []
+    for path in jobs_dir().glob("*"):
+        if not path.is_dir() or not (path / "meta.json").is_file():
+            continue
+        try:
+            status = get_status(path)
+            created = dt.datetime.fromisoformat(status["created_at"])
+        except (RunnerError, KeyError, TypeError, ValueError):
+            continue
+        if created < cutoff or status.get("cli") != cli or status.get("model") != model:
+            continue
+        overall.append(status)
+        if task_type == "general" or inferred_task_type(status) == task_type:
+            matching.append(status)
+
+    def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
+        reviewed_states = {"accepted", "repair_required", "rejected"}
+        failure_states = {"failed", "timed_out", "scope_violated", "lost"}
+        reviewed = [
+            item for item in records if item.get("acceptance_state") in reviewed_states
+        ]
+        accepted = sum(item.get("acceptance_state") == "accepted" for item in reviewed)
+        failures = sum(
+            item.get("execution_state") in failure_states for item in records
+        )
+        return {
+            "attempts": len(records),
+            "reviewed": len(reviewed),
+            "accepted": accepted,
+            "reviewed_acceptance_rate": (
+                round(accepted / len(reviewed), 4) if reviewed else None
+            ),
+            "execution_failure_rate": (
+                round(failures / len(records), 4) if records else None
+            ),
+        }
+
+    return {"task": summarize(matching), "overall": summarize(overall)}
+
+
+def rank_executor_candidates(
+    candidates: list[dict[str, Any]], strategy: str, risk: str, task_type: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    evidence = load_model_evidence()
+    ranked: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for position, candidate in enumerate(candidates):
+        key = (candidate["cli"], candidate.get("model"))
+        if key in seen:
+            continue
+        seen.add(key)
+        model = candidate.get("model")
+        if "astra" in (model or "").casefold() and strategy != "maximum-quality":
+            continue
+        if is_expensive_executor_model(model) and strategy == "cost-first":
+            continue
+        prior = evidence_prior(model, evidence)
+        outcomes = local_executor_outcomes(candidate["cli"], model, task_type)
+        score = 100.0 - position * 8 + float(prior.get("capability_tier", 1)) * 2
+        strengths = prior.get("strengths", [])
+        if task_type in strengths:
+            score += 4
+        local_source = "public_prior_only"
+        local = outcomes["task"]
+        if local["reviewed"] >= 3:
+            score += (local["reviewed_acceptance_rate"] - 0.5) * 30
+            local_source = "task_specific_reviewed_history"
+        elif outcomes["overall"]["reviewed"] >= 5:
+            local = outcomes["overall"]
+            score += (local["reviewed_acceptance_rate"] - 0.5) * 15
+            local_source = "overall_reviewed_history"
+        failure_rate = local.get("execution_failure_rate")
+        if failure_rate is not None:
+            score -= failure_rate * 12
+        entry = dict(candidate)
+        entry.update(
+            benchmark_sources=prior.get("sources", []),
+            capability_tier=prior.get("capability_tier", 1),
+            local_evidence=outcomes,
+            evidence_basis=local_source,
+            routing_score=round(score, 3),
+            task_type=task_type,
+            risk=risk,
+        )
+        ranked.append(entry)
+    ranked.sort(
+        key=lambda item: (-item["routing_score"], item["cli"], item.get("model") or "")
+    )
+    for index, entry in enumerate(ranked, 1):
+        entry["rank"] = index
+        entry["selection_reason"] = (
+            f"Ranked for {task_type} / {risk} using {entry['evidence_basis']} plus "
+            "versioned public capability evidence"
+        )
+    return ranked, {
+        "as_of": evidence.get("as_of"),
+        "methodology": evidence.get("methodology"),
+        "sources": evidence.get("sources"),
+        "minimum_task_specific_reviewed_jobs": 3,
+        "minimum_overall_reviewed_jobs": 5,
+    }
+
+
 def automatic_executor_policy(
-    strategy: str, risk: str, profiles: dict[str, dict[str, Any]]
+    strategy: str,
+    risk: str,
+    profiles: dict[str, dict[str, Any]],
+    task_type: str = "general",
 ) -> dict[str, Any]:
     """Resolve a bounded executor pool from explicit orchestration intent and installed CLIs."""
     if strategy not in STRATEGIES:
         raise RunnerError(f"Unknown strategy: {strategy}")
     if risk not in RISKS:
         raise RunnerError(f"Unknown risk: {risk}")
+    if task_type not in TASK_TYPES:
+        raise RunnerError(f"Unknown task type: {task_type}")
     authorization_source = {
         "cost-first": "default_cost_first_policy",
         "quality-first": "user_requested_quality_over_cost",
         "maximum-quality": "user_requested_maximum_or_frontier_quality",
     }[strategy]
-    allowed: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     for candidate in AUTO_EXECUTOR_CANDIDATES[strategy]:
         profile = profiles.get(candidate["cli"])
         if not profile or not resolve_profile_executable(profile)[1]:
@@ -1151,24 +1352,23 @@ def automatic_executor_policy(
             continue
         if "astra" in model.casefold() and strategy != "maximum-quality":
             continue
-        allowed.append(
+        candidates.append(
             {
                 "cli": candidate["cli"],
                 "model": model,
                 "display": f"{candidate['cli']}={model}",
                 "reasoning_effort": candidate["effort"][risk],
-                "rank": len(allowed) + 1,
                 "auto_selected": True,
                 "authorization_source": authorization_source,
                 "expensive_user_approved": bool(
                     is_expensive_executor_model(model)
                     and strategy in {"quality-first", "maximum-quality"}
                 ),
-                "selection_reason": (
-                    f"Installed {strategy} candidate for {risk}-risk bounded execution"
-                ),
             }
         )
+    allowed, routing_evidence = rank_executor_candidates(
+        candidates, strategy, risk, task_type
+    )
     if not allowed:
         raise RunnerError(
             f"No installed executor matches the automatic {strategy} policy. "
@@ -1178,6 +1378,8 @@ def automatic_executor_policy(
         "mode": "automatic_strategy_allowlist",
         "strategy": strategy,
         "risk": risk,
+        "task_type": task_type,
+        "routing_evidence": routing_evidence,
         "authorization_source": authorization_source,
         "allowed": allowed,
         "on_exhausted": "request_user_approval",
@@ -1563,8 +1765,12 @@ def command_create_plan(args: argparse.Namespace) -> int:
                 "Automatic executor selection does not use a separate Terra fallback"
             )
         policy = automatic_executor_policy(
-            args.strategy, args.risk, load_profiles(config_path(args.config))
+            args.strategy,
+            args.risk,
+            load_profiles(config_path(args.config)),
+            args.task_type,
         )
+    preferences = load_preferences()
     plan = {
         "plan_id": selected_plan_id,
         "title": args.title,
@@ -1572,11 +1778,13 @@ def command_create_plan(args: argparse.Namespace) -> int:
         "created_at": utc_now(),
         "plan_file": str(plan_copy),
         "plan_sha256": hashlib.sha256(plan_copy.read_bytes()).hexdigest(),
+        "workspace_mode": preferences["workspace_mode"],
         "goal": {
             "objective": named_section_body(text, "Goal"),
             "status": "active",
             "strategy": args.strategy,
             "risk": args.risk,
+            "task_type": args.task_type,
             "created_at": utc_now(),
         },
         "executor_policy": policy,
@@ -1587,6 +1795,18 @@ def command_create_plan(args: argparse.Namespace) -> int:
     print(
         json.dumps(output, indent=2, sort_keys=True) if args.json else selected_plan_id
     )
+    return 0
+
+
+def command_preferences(args: argparse.Namespace) -> int:
+    preferences = load_preferences()
+    if args.workspace_mode:
+        preferences["workspace_mode"] = args.workspace_mode
+        save_preferences(preferences)
+    if args.json:
+        print(json.dumps(preferences, indent=2, sort_keys=True))
+    else:
+        print(f"workspace_mode: {preferences['workspace_mode']}")
     return 0
 
 
@@ -1745,11 +1965,16 @@ def command_metrics(args: argparse.Namespace) -> int:
                 "jobs": 0,
                 "execution_states": {},
                 "acceptance_states": {},
+                "task_types": {},
                 "provider_usage_jobs": 0,
                 "usage": {},
             },
         )
         group["jobs"] += 1
+        observed_task_type = inferred_task_type(status)
+        group["task_types"][observed_task_type] = (
+            group["task_types"].get(observed_task_type, 0) + 1
+        )
         for field, bucket in (
             ("execution_state", "execution_states"),
             ("acceptance_state", "acceptance_states"),
@@ -1792,6 +2017,95 @@ def command_metrics(args: argparse.Namespace) -> int:
         json.dumps(output, indent=2, sort_keys=True)
         if args.json
         else json.dumps(output, sort_keys=True)
+    )
+    return 0
+
+
+def command_recommend_executors(args: argparse.Namespace) -> int:
+    profiles = load_profiles(config_path(args.config))
+    candidates: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
+    requested = [(value, False) for value in args.candidate] + [
+        (value, True) for value in args.expensive_candidate
+    ]
+    if requested:
+        for value, separately_approved in requested:
+            raw_model = value.split("=", 1)[1].strip() if "=" in value else None
+            normalized = (raw_model or "").casefold()
+            if "astra" in normalized and args.strategy != "maximum-quality":
+                raise RunnerError(
+                    "Astra can be recommended for execution only with --strategy maximum-quality"
+                )
+            intent_approved = args.strategy in {"quality-first", "maximum-quality"}
+            entry = parse_executor_spec(
+                value, expensive_approved=separately_approved or intent_approved
+            )
+            profile = profiles.get(entry["cli"])
+            if not profile:
+                excluded.append(
+                    {"candidate": entry["display"], "reason": "unknown_cli"}
+                )
+                continue
+            if not resolve_profile_executable(profile)[1]:
+                excluded.append(
+                    {"candidate": entry["display"], "reason": "cli_not_installed"}
+                )
+                continue
+            entry.update(
+                reasoning_effort={"low": "medium", "medium": "high", "high": "xhigh"}[
+                    args.risk
+                ],
+                auto_selected=True,
+                authorization_source=(
+                    "user_requested_maximum_or_frontier_quality"
+                    if args.strategy == "maximum-quality"
+                    else (
+                        "user_requested_quality_over_cost"
+                        if args.strategy == "quality-first"
+                        else "default_cost_first_policy"
+                    )
+                ),
+            )
+            candidates.append(entry)
+    else:
+        for candidate in AUTO_EXECUTOR_CANDIDATES[args.strategy]:
+            profile = profiles.get(candidate["cli"])
+            if not profile or not resolve_profile_executable(profile)[1]:
+                continue
+            candidates.append(
+                {
+                    "cli": candidate["cli"],
+                    "model": candidate["model"],
+                    "display": f"{candidate['cli']}={candidate['model']}",
+                    "reasoning_effort": candidate["effort"][args.risk],
+                    "auto_selected": True,
+                }
+            )
+    ranked, evidence = rank_executor_candidates(
+        candidates, args.strategy, args.risk, args.task_type
+    )
+    if not ranked:
+        raise RunnerError(
+            "No installed, policy-eligible candidates remain. Run choices/catalog or provide "
+            "a user-approved candidate list."
+        )
+    output = {
+        "strategy": args.strategy,
+        "risk": args.risk,
+        "task_type": args.task_type,
+        "recommended": ranked,
+        "excluded": excluded,
+        "evidence": evidence,
+        "guardrail": (
+            "Recommendations never widen the user's executor pool. Confirm discovered exact model "
+            "IDs, lock the chosen entries into the plan, and never select Astra without explicit "
+            "maximum-quality authorization."
+        ),
+    }
+    print(
+        json.dumps(output, indent=2, sort_keys=True)
+        if args.json
+        else "\n".join(entry["display"] for entry in ranked)
     )
     return 0
 
@@ -2676,6 +2990,9 @@ def command_launch(args: argparse.Namespace) -> int:
         "route": args.route,
         "coordinator_model": args.coordinator_model,
         "reasoning_effort": args.reasoning_effort,
+        "task_type": (
+            (plan.get("goal") or {}).get("task_type") if plan is not None else "general"
+        ),
         "cli_agent": args.cli_agent,
         "max_turns": args.max_turns,
         "max_cost_usd": args.max_cost_usd,
@@ -3546,6 +3863,13 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config")
     doctor.set_defaults(func=command_doctor)
 
+    preferences = subparsers.add_parser(
+        "preferences", help="Read or save persistent orchestration preferences"
+    )
+    preferences.add_argument("--workspace-mode", choices=WORKSPACE_MODES)
+    preferences.add_argument("--json", action="store_true")
+    preferences.set_defaults(func=command_preferences)
+
     create_plan = subparsers.add_parser(
         "create-plan", help="Create a durable plan and checklist ledger"
     )
@@ -3563,6 +3887,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     create_plan.add_argument("--risk", choices=RISKS, default="medium")
+    create_plan.add_argument("--task-type", choices=TASK_TYPES, default="general")
     create_plan.add_argument("--config")
     create_plan.add_argument(
         "--executor",
@@ -3612,6 +3937,23 @@ def build_parser() -> argparse.ArgumentParser:
     metrics.add_argument("--workspace")
     metrics.add_argument("--json", action="store_true")
     metrics.set_defaults(func=command_metrics)
+
+    recommend = subparsers.add_parser(
+        "recommend-executors",
+        help="Rank installed executor choices using public priors and reviewed local outcomes",
+    )
+    recommend.add_argument("--strategy", choices=STRATEGIES, default="cost-first")
+    recommend.add_argument("--risk", choices=RISKS, default="medium")
+    recommend.add_argument("--task-type", choices=TASK_TYPES, default="general")
+    recommend.add_argument(
+        "--candidate", action="append", default=[], metavar="CLI=MODEL"
+    )
+    recommend.add_argument(
+        "--expensive-candidate", action="append", default=[], metavar="CLI=MODEL"
+    )
+    recommend.add_argument("--config")
+    recommend.add_argument("--json", action="store_true")
+    recommend.set_defaults(func=command_recommend_executors)
 
     set_executors = subparsers.add_parser(
         "set-executors", help="Replace a plan's user-approved executor allowlist"
