@@ -57,8 +57,12 @@ uninstalled CLI, or admit Astra outside `maximum-quality`.
 ## Durable plan and goal
 
 Create a plan for every Agent Orchestrator run. The top-level goal and checklist are its external
-memory, so the user never needs to transfer a plan between harnesses. Use the native Codex goal
-mechanism only when the user explicitly asks for persistent end-to-end pursuit.
+memory, so the user never needs to transfer a plan between harnesses. Treat an explicit request to
+use Agent Orchestrator as an explicit request for native Codex goal persistence unless the user
+opts out. Call `get_goal` after plan creation, create a native goal only when none is unfinished,
+reuse an aligned existing goal, and stop for direction rather than replacing an unrelated goal.
+Keep the native objective stable and concise; keep detailed steps and executor state in the durable
+plan.
 
 Use these exact sections:
 
@@ -144,6 +148,11 @@ events and notifications instead of repeatedly waking the coordinator on unchang
 Observability data belongs in the dashboard, not permanently in model context. Open `dashboard-web`
 after long-running launches when helpful; it groups every workspace in the configured state home
 and refreshes every two seconds without discarding answer drafts.
+
+On a native-goal continuation, call `get_goal` before `plan-checkpoint`. Mark the native goal
+complete only after the durable plan, independent review, validation, and owned cleanup are all
+complete. Do not mark it complete because an executor exited successfully or the token budget is
+low.
 
 Use `request-feedback --workspace <workspace> --question-file <file> --json` to preserve a project
 decision outside any worker. Link `--plan-id` and optionally `--checklist-item` when appropriate.

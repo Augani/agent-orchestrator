@@ -11,6 +11,11 @@ and independently review the resulting diff and tests before accepting it. Large
 from one prompt: Codex creates a durable plan, maintains its checklist, dispatches each item, handles
 questions, applies gates, and keeps the evidence needed to resume later.
 
+Requesting Agent Orchestrator also asks Codex to create a native persistent goal when the task does
+not already have one, unless you opt out. If an aligned goal already exists it is reused; an
+unrelated active goal is never overwritten. The native goal keeps Codex pursuing the outcome while
+the durable plan holds detailed checklist, executor, question, and review state.
+
 ## Why separate coordination from execution?
 
 Long-running agent work mixes two different workloads:

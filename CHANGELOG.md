@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1 - 2026-09-14
+
+- Treat an explicit Agent Orchestrator invocation as a request for a native Codex persistent goal,
+  unless the user opts out.
+- Create a native goal only when none is unfinished, reuse an aligned existing goal, and stop for
+  user direction instead of replacing an unrelated active goal.
+- Keep detailed execution state in the durable plan and complete the native goal only after plan,
+  review, validation, and owned-cleanup gates all pass.
+
 ## 0.7.0 - 2026-09-14
 
 - Add a sandboxed Cursor CLI adapter with live model discovery and explicit model selection.

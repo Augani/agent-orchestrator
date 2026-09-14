@@ -145,11 +145,26 @@ Write the plan from the user's prompt and repository evidence, including decisio
 validation, completion criteria, and bounded checklist items. Do not make the user transfer a plan
 from another harness. Bind every executor job to one checklist item.
 
-The plan's `goal` object is the default durable goal mechanism. Use Codex's native goal tool only
-when the user explicitly asks to set a goal, finish end-to-end, keep working until completion, or
-otherwise requests persistent autonomous pursuit. On every native-goal continuation, read
-`plan-checkpoint` first and resume from that compact record; do not reconstruct state by replaying
-the full chat, raw logs, or every historical job.
+An explicit request to use Agent Orchestrator is also an explicit request for Codex to pursue that
+orchestration goal persistently, unless the user says not to set a native goal. After creating the
+durable plan, call `get_goal`:
+
+- If no unfinished native Codex goal exists, call `create_goal` once. Use a concise objective based
+  on the plan's `Goal` and completion criteria: finish every applicable checklist item, pass the
+  independent review and validation gates, and perform owned cleanup. Do not include volatile job
+  IDs, chosen executors, or intermediate steps in the native objective.
+- If an unfinished native goal already describes the same outcome, keep it and link the new durable
+  plan operationally by resuming from `plan-checkpoint`; do not create a duplicate.
+- If an unfinished native goal belongs to different work, do not replace, broaden, or silently
+  repurpose it. Explain the conflict and ask the user which goal should remain active.
+
+The durable plan remains the detailed external memory; the native goal supplies persistence. On
+every automatic continuation, call `get_goal`, then read `plan-checkpoint` first and resume from that
+compact record. Do not reconstruct state by replaying the full chat, raw logs, or every historical
+job. Call `update_goal(status="complete")` only after the plan is complete, every accepted change
+has passed review and validation, required cleanup is done, and no requested work remains. Follow
+Codex's native repeated-blocker rule before marking a goal blocked; a slow or failed executor alone
+is not a blocker.
 
 Create the plan with its approved pool, or set the pool after model discovery:
 
