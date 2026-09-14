@@ -32,6 +32,13 @@ most capable model for complex reasoning and coding. Stronger execution can also
 attempts and output volume, so the useful metric is cost per accepted task—not price per token
 alone. [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)
 
+The other major cost is coordinator replay. In one anonymized 24-hour project trace, a single
+long-lived coordinator accumulated 528.4 million input tokens, 519.5 million of them cached, across
+48 task turns and 29 context compactions. The executor jobs were bounded; repeatedly waking the
+near-full coordinator was the dominant amplification. Agent Orchestrator therefore resumes from a
+small durable `plan-checkpoint`, waits once after dispatch, and relies on phase changes, questions,
+completion events, the dashboard, and notifications instead of tight polling.
+
 ## What it provides
 
 - Independent selection of CLI, model, and a CLI's internal agent/persona when supported.
@@ -47,10 +54,12 @@ alone. [OpenAI model guidance](https://developers.openai.com/api/docs/guides/lat
   limits.
 - Durable plans with decision records, checklist-bound jobs, resumable progress, and completion
   evidence.
-- User-selectable model-role routes, task-capsule budgets, reasoning-effort selection, and
-  provider-reported usage capture.
-- Fail-closed executor pools: routes never silently select a model, every launch must match a
-  user-approved CLI/model pairing, and frontier executors need separate cost approval.
+- Automatic intent routing with a cost-first default, quality-first Sol/Opus execution, explicit
+  maximum-quality Astra authorization, risk-based reasoning effort, and exact durable allowlists.
+- Compact goal checkpoints and 24-hour outcome/usage metrics for evidence-based routing without
+  replaying the full coordinator transcript.
+- Fail-closed executor pools: every launch must match the plan's resolved or user-selected exact
+  CLI/model pairing, and Astra never appears from a failure fallback.
 - Controlled escalation that exhausts the approved pool, asks in chat and the dashboard, and can
   use only a pre-approved Terra fallback after an unanswered grace period.
 - A concise installed-harness chooser followed by harness-specific model and internal-agent
@@ -123,26 +132,27 @@ Run `routes` to inspect the built-in policies:
 
 | Route | Recommended Codex task model | Executor | Best when |
 | --- | --- | --- | --- |
-| `quality-first` | GPT-5.6 Luna | Recommends Codex CLI + GPT-6 Astra, but never selects it | You explicitly accept frontier execution cost for a bounded task. |
+| `cost-first` (default) | Current task model | Installed Terra, then Luna, with risk-based effort | You want the lowest expected cost per accepted change without weakening quality gates. |
+| `quality-first` | Current task model | Installed Sol, Opus, then Terra, with risk-based effort | You say “quality over cost”; this authorizes Sol/Opus but not Astra. |
+| `maximum-quality` | Current task model | Installed Astra, Sol, and Opus | You explicitly authorize maximum/frontier execution quality and cost. |
 | `economy-first` | GPT-6 Astra | Recommends Codex CLI + GPT-5.6 Luna, but never selects it | Architecture and review are hard, but implementation can use an approved lower-cost pool. |
 | Custom | Your choice | Any supported CLI/model/agent/effort | You want another provider or complete control over the pairing. |
 
-The current Codex task model is always the orchestrator. Routes recommend a task model; they do
-not select or change it. Since the runner cannot infer that model, coordinator metadata defaults
-to `current-codex-task` for every route and custom launch. An explicit `--coordinator-model` always
-wins. Routes are recommendations only: they never fill CLI, model, agent, or effort values. Every
-launch must name its executor and match the user's durable allowlist or a one-off approval:
+The current Codex task model is always the orchestrator. The runner never changes it; coordinator
+metadata defaults to `current-codex-task`, and an explicit `--coordinator-model` only changes that
+metadata. `create-plan` resolves an automatic installed-model allowlist from natural-language intent
+and risk, while every individual launch still names and verifies the exact executor:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py routes
 
-# Costly example: Astra executes only after explicit executor-role and cost approval.
+# Quality over cost: Sol is selected from the plan's automatic pool; Astra remains excluded.
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --route quality-first \
   --cli codex-cli \
-  --model gpt-6-astra \
-  --reasoning-effort high \
-  --approved-expensive-executor 'codex-cli=gpt-6-astra' \
+  --model gpt-5.6-sol \
+  --plan-id <plan-id> \
+  --checklist-item item-001 \
   --workspace /path/to/worktree \
   --task-file /path/to/task.md \
   --json
@@ -165,12 +175,27 @@ presents what is actually installed, then the selected harness's available model
 
 The coordinator model override is workflow metadata, not a model switch. Select the desired model
 for the Codex task itself. Model availability and billing depend on your account and provider.
-Using Astra for planning or review does not approve it for implementation.
+Using Astra for planning or review does not approve it for implementation. Only an explicit
+`maximum-quality` plan or explicit expensive executor selection does.
 
-## Lock execution to a user-approved pool
+## Resolve and lock the executor pool
 
-For long work, show the installed choices and ask the user for every CLI/model pairing they allow.
-Persist that list with the plan or replace it later after another explicit user choice:
+When the user invokes Agent Orchestrator without naming an executor, the default is automatic
+`cost-first`. Saying “quality over cost” selects `quality-first`. Only an explicit maximum/frontier
+request enables `maximum-quality`. Risk controls reasoning effort; it does not relax review gates:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
+  --title 'Authentication refresh' \
+  --workspace /path/to/project \
+  --plan-file /path/to/plan.md \
+  --strategy quality-first \
+  --risk high \
+  --json
+```
+
+The plan records every installed CLI/model choice, rank, effort, rationale, and authorization
+source. If the user names a custom set, persist exactly that set instead:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
@@ -192,8 +217,10 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py set-executors <plan-
 
 `CLI=MODEL` is exact. A bare CLI is permitted only for adapters such as OpenCode that cannot select
 a model themselves, and means the user knowingly approved that configured default. Astra, Fable,
-Opus, and other known expensive/frontier choices belong under `--expensive-executor`, which records
-that the user accepted execution cost rather than merely using that model to plan or review.
+Opus, and other known expensive/frontier choices in a custom pool belong under
+`--expensive-executor`, which records that the user accepted execution cost rather than merely
+using that model to plan or review. Automatic `quality-first` is the narrow exception for Sol/Opus
+because the user's quality-over-cost wording is itself recorded authorization; it never adds Astra.
 
 The optional Terra fallback must also be disclosed up front. It does not run merely because a
 worker is quiet: every primary entry must have been attempted, a linked question must be visible in
@@ -202,7 +229,7 @@ period, and the fallback task packet must be under 32 KiB. Astra is never an aut
 
 ## One prompt to a durable plan
 
-For multi-stage or long-running work, Codex offers to turn the original request into a plan with
+For every Agent Orchestrator run, Codex turns the original request into a plan with
 decisions, guardrails, validation strategy, completion criteria, and bounded checklist items. Users
 do not need to create a plan in another harness or manually transfer context.
 
@@ -211,15 +238,14 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
   --title 'Authentication refresh' \
   --workspace /path/to/project \
   --plan-file /path/to/plan.md \
-  --executor 'devin=swe-2' \
-  --executor 'grok=grok-code-fast-1' \
-  --terra-fallback-after-seconds 900 \
+  --strategy cost-first \
+  --risk medium \
   --json
 
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
-  --route quality-first \
-  --cli devin \
-  --model swe-2 \
+  --route cost-first \
+  --cli codex-cli \
+  --model gpt-5.6-terra \
   --plan-id <plan-id> \
   --checklist-item item-001 \
   --workspace /path/to/worktree \
@@ -227,6 +253,7 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --json
 
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py plan-status <plan-id> --json
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py plan-checkpoint <plan-id> --json
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py executor-options <plan-id> \
   --checklist-item item-001 --json
 ```
@@ -234,6 +261,11 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py executor-options <pl
 Built-in routes cap a task capsule at 64 KiB. Oversized packets are stopped with guidance to create
 a plan and split the work. This keeps the executor focused and preserves the complete workflow in
 durable state instead of an ever-growing model transcript.
+
+Use `plan-checkpoint` for every automatic continuation. It returns only the goal, next item,
+completed items, active/unreviewed jobs, pending feedback, and aggregate provider usage. Use
+`metrics --since-hours 24 --json` to compare recent attempts, reviewed acceptance, failures, and
+reported usage by CLI/model. Missing usage is unavailable, never zero.
 
 ## Typical delegated flow
 

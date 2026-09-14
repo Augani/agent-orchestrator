@@ -4,14 +4,25 @@ Use this mode when the user wants to choose which model keeps context and which 
 
 ## Model-role flows
 
-`quality-first` keeps long-lived coordination inexpensive and recommends spending capability on
-bounded work:
+`cost-first` is the default when the user gives no preference:
 
-- Recommended task selection: GPT-5.6 Luna for decisions, dependencies, questions, and progress summaries.
-- Codex CLI with GPT-6 Astra at high reasoning effort is a recommendation only. It cannot execute
-  unless the user explicitly adds it as an expensive executor.
-- Astra is recommended for high-risk review, but review model cost must also be visible to the user;
-  review selection never grants Astra permission to execute implementation work.
+- The current Codex task remains the coordinator.
+- Installed Codex CLI Terra and Luna models form a bounded automatic pool.
+- Risk selects reasoning effort. Review, tests, scope controls, and acceptance gates are unchanged.
+- Optimize attempts and provider usage per accepted result, not nominal price per token.
+
+`quality-first` is selected by an explicit “quality over cost” or equivalent intent:
+
+- The current Codex task remains the coordinator regardless of its model.
+- Installed Codex CLI Sol and Claude Code Opus may execute short, bounded jobs, with Terra as a
+  balanced fallback in the same allowlist.
+- The phrase authorizes Sol/Opus execution cost, but never Astra.
+
+`maximum-quality` requires an explicit maximum/frontier-quality request or explicit Astra executor
+selection:
+
+- Installed Astra, Sol, and Opus may form the automatic pool.
+- Astra's inclusion records the user's intent as executor authorization; no failure may invent it.
 
 `economy-first` spends capability on strategy and recommends lower-cost routine execution:
 
@@ -23,26 +34,17 @@ For any other pairing, omit `--route` and pass the coordinator metadata, CLI, ex
 effort independently. The current Codex task model is always the orchestrator. The runner cannot
 infer it and defaults coordinator metadata to `current-codex-task`. Recommendations do not change
 the current task model; only an explicit `--coordinator-model` replaces the default metadata.
-Routes never fill missing executor values. Every launch must name a CLI/model and match a durable
-user-approved pool or an explicit one-off approval. Planning or review model selection never grants
-implementation authority.
+Every launch names a CLI/model and matches the durable pool resolved during planning or an explicit
+one-off approval. Planning or review model selection never grants implementation authority.
 
 These are routing policies, not universal cost claims. Capture usage and compare cost per accepted
 task, including retries and review.
 
-## When to offer a plan
+## Durable plan and goal
 
-Offer one compact planning choice when any of these is true:
-
-- the request contains multiple independently reviewable outcomes;
-- implementation needs several workers, worktrees, or ordered dependencies;
-- the work may outlive the current conversation context;
-- the task packet approaches the 64 KiB route budget;
-- product, security, or architecture decisions must be preserved before execution.
-
-Do not ask again if the user already requested a plan or authorized the complete workflow. Create
-the plan from their original prompt and repository inspection so they never need to transfer a plan
-between harnesses.
+Create a plan for every Agent Orchestrator run. The top-level goal and checklist are its external
+memory, so the user never needs to transfer a plan between harnesses. Use the native Codex goal
+mechanism only when the user explicitly asks for persistent end-to-end pursuit.
 
 Use these exact sections:
 
@@ -80,8 +82,11 @@ python3 <runner> create-plan \
   --title '<short title>' \
   --workspace <workspace> \
   --plan-file <plan.md> \
+  --strategy cost-first \
+  --risk medium \
   --json
 python3 <runner> plan-status <plan-id> --json
+python3 <runner> plan-checkpoint <plan-id> --json
 ```
 
 Create one detailed task contract per checklist item. Launch with `--plan-id` and
@@ -90,11 +95,11 @@ unreviewed dependency.
 
 ## Executor pool and escalation
 
-After catalog discovery, ask the user which exact `CLI=MODEL` combinations may implement plan
-items. Persist them with `create-plan --executor ...` or `set-executors`. Record Astra, Fable, Opus,
-or another known expensive/frontier executor with `--expensive-executor` only after a clear cost
-warning and explicit user approval. The default is fail-closed: an empty pool cannot launch, an
-unlisted executor cannot launch, and routes cannot silently populate the pool.
+When the user does not name executors, `create-plan --strategy ... --risk ...` resolves only
+installed built-in candidates into a durable allowlist. The default is `cost-first`. A
+`quality-first` intent authorizes Sol/Opus but excludes Astra; `maximum-quality` is the only
+automatic policy that admits Astra. When the user names exact `CLI=MODEL` combinations, persist
+those instead with `--executor` or `--expensive-executor`. An unlisted executor still cannot launch.
 
 When a worker fails or reaches its declared timeout, prefer an untried approved executor. Use
 `executor-options` to see attempts and remaining choices. Once the pool is exhausted, ask in the
@@ -109,8 +114,10 @@ An executor capsule contains exact file and symbol pointers, contracts, invarian
 guidance, acceptance criteria, tests, authority limits, and the injected question channel. Refer to
 repository files instead of pasting large source blocks.
 
-The coordinator retains compact decisions, item states, job IDs, changed files, test outcomes,
-review verdicts, and unresolved questions. Read raw output only to diagnose a specific failure.
+The coordinator resumes from `plan-checkpoint`, which contains the goal, next item, completed
+items, active/unreviewed jobs, pending feedback, and aggregate usage. Read raw output only to
+diagnose a specific failure. Wait once for up to 45 seconds after launch, then rely on dashboard
+events and notifications instead of repeatedly waking the coordinator on unchanged state.
 Observability data belongs in the dashboard, not permanently in model context. Open `dashboard-web`
 after long-running launches when helpful; it groups every workspace in the configured state home
 and refreshes every two seconds without discarding answer drafts.

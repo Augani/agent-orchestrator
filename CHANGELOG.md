@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 - 2026-09-14
+
+- Add automatic intent routing: `cost-first` by default, `quality-first` for explicit
+  quality-over-cost requests, and `maximum-quality` only for explicit frontier authorization.
+- Let quality-first plans automatically use installed GPT-5.6 Sol and Claude Opus executors while
+  continuing to exclude Astra; only maximum-quality can place Astra in an automatic pool.
+- Classify plans by low, medium, or high risk and persist each executor's rank, reasoning effort,
+  rationale, and authorization source. Plan-bound launches inherit the recorded effort.
+- Store the plan's Goal as a durable goal ledger and add `plan-checkpoint` for compact continuation
+  state instead of replaying full coordinator history and raw logs.
+- Add recent per-executor outcome and provider-usage aggregation with `metrics --since-hours 24`.
+- Document evidence from a long-running trace showing coordinator context replay—not bounded
+  executor input—was the dominant token amplifier, and require event-driven monitoring.
+- Add GPT-5.6 Sol to the built-in Codex CLI model catalog while retaining custom executor pools,
+  review gates, scope controls, dashboard feedback, and the no-silent-Astra fallback rule.
+
 ## 0.5.0 - 2026-09-14
 
 - Make executor routing fail closed: built-in routes are recommendations only, model-capable CLIs

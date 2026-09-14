@@ -13,14 +13,18 @@ from pathlib import Path
 
 
 RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "cli_agent_job.py"
-RUNNER_SPEC = importlib.util.spec_from_file_location("agent_orchestrator_runner", RUNNER)
+RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "agent_orchestrator_runner", RUNNER
+)
 assert RUNNER_SPEC and RUNNER_SPEC.loader
 runner = importlib.util.module_from_spec(RUNNER_SPEC)
 RUNNER_SPEC.loader.exec_module(runner)
 
 
 class CliAgentJobTests(unittest.TestCase):
-    def run_cli(self, *args: str, env: dict[str, str], expected: int = 0) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self, *args: str, env: dict[str, str], expected: int = 0
+    ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             [sys.executable, str(RUNNER), *args],
             capture_output=True,
@@ -53,7 +57,7 @@ class CliAgentJobTests(unittest.TestCase):
 
     def install_fake_codex(self, root: Path, env: dict[str, str]) -> None:
         bin_dir = root / "bin"
-        bin_dir.mkdir()
+        bin_dir.mkdir(exist_ok=True)
         executable = bin_dir / "codex"
         executable.write_text(
             "#!/usr/bin/env python3\n"
@@ -64,6 +68,17 @@ class CliAgentJobTests(unittest.TestCase):
         )
         executable.chmod(0o755)
         env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+
+    def write_plan(self, path: Path) -> None:
+        path.write_text(
+            "# Goal\nShip the bounded feature with review evidence.\n\n"
+            "# Decisions and assumptions\nFollow the existing public contract.\n\n"
+            "# Constraints and guardrails\nDo not publish or change credentials.\n\n"
+            "# Checklist\n- [ ] Implement and verify the feature.\n\n"
+            "# Validation strategy\nRun the focused tests.\n\n"
+            "# Completion criteria\nThe review is accepted with test evidence.\n",
+            encoding="utf-8",
+        )
 
     def test_custom_file_adapter_runs_as_detached_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -122,7 +137,9 @@ class CliAgentJobTests(unittest.TestCase):
                 env=env,
             )
             self.assertEqual(json.loads(waited.stdout)["state"], "succeeded")
-            self.assertEqual(json.loads(waited.stdout)["coordinator_model"], "current-codex-task")
+            self.assertEqual(
+                json.loads(waited.stdout)["coordinator_model"], "current-codex-task"
+            )
             logs = self.run_cli("logs", job_id, "--stream", "stdout", env=env)
             self.assertIn("implement the bounded change", logs.stdout)
 
@@ -213,24 +230,84 @@ class CliAgentJobTests(unittest.TestCase):
             workspace = root / "project"
             workspace.mkdir()
             env = {**os.environ, "AGENT_ORCHESTRATOR_HOME": str(root / "state")}
-            result = self.run_cli("request-feedback", "--workspace", str(workspace), "--question", "Which scope?", "--context", "Choose one.", "--feedback-id", "project-choice", "--no-notify", "--json", env=env)
+            result = self.run_cli(
+                "request-feedback",
+                "--workspace",
+                str(workspace),
+                "--question",
+                "Which scope?",
+                "--context",
+                "Choose one.",
+                "--feedback-id",
+                "project-choice",
+                "--no-notify",
+                "--json",
+                env=env,
+            )
             record = json.loads(result.stdout)
             self.assertEqual(record["source"], "orchestrator")
             self.assertEqual(record["project_name"], "project")
             path = root / "state" / "feedback" / "project-choice"
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
             self.assertEqual((path / "feedback.json").stat().st_mode & 0o777, 0o600)
-            self.assertEqual(len(json.loads(self.run_cli("feedback", "--json", env=env).stdout)), 1)
-            self.run_cli("answer-feedback", "project-choice", "--text", "Minimal scope.", "--json", env=env)
-            self.run_cli("answer-feedback", "project-choice", "--text", "Again.", env=env, expected=2)
-            self.assertEqual(json.loads(self.run_cli("feedback", "--json", env=env).stdout), [])
-            history = json.loads(self.run_cli("feedback", "--all", "--json", env=env).stdout)
+            self.assertEqual(
+                len(json.loads(self.run_cli("feedback", "--json", env=env).stdout)), 1
+            )
+            self.run_cli(
+                "answer-feedback",
+                "project-choice",
+                "--text",
+                "Minimal scope.",
+                "--json",
+                env=env,
+            )
+            self.run_cli(
+                "answer-feedback",
+                "project-choice",
+                "--text",
+                "Again.",
+                env=env,
+                expected=2,
+            )
+            self.assertEqual(
+                json.loads(self.run_cli("feedback", "--json", env=env).stdout), []
+            )
+            history = json.loads(
+                self.run_cli("feedback", "--all", "--json", env=env).stdout
+            )
             self.assertEqual(history[0]["answer"], "Minimal scope.")
             self.assertTrue(history[0]["answered_at"])
             other_env = {**env, "AGENT_ORCHESTRATOR_HOME": str(root / "other-state")}
-            self.assertEqual(json.loads(self.run_cli("feedback", "--all", "--json", env=other_env).stdout), [])
-            self.run_cli("request-feedback", "--workspace", str(workspace), "--question", "Question", "--feedback-id", "../bad", "--no-notify", env=env, expected=2)
-            self.run_cli("request-feedback", "--workspace", str(workspace), "--question", "Question", "--checklist-item", "item-001", "--no-notify", env=env, expected=2)
+            self.assertEqual(
+                json.loads(
+                    self.run_cli("feedback", "--all", "--json", env=other_env).stdout
+                ),
+                [],
+            )
+            self.run_cli(
+                "request-feedback",
+                "--workspace",
+                str(workspace),
+                "--question",
+                "Question",
+                "--feedback-id",
+                "../bad",
+                "--no-notify",
+                env=env,
+                expected=2,
+            )
+            self.run_cli(
+                "request-feedback",
+                "--workspace",
+                str(workspace),
+                "--question",
+                "Question",
+                "--checklist-item",
+                "item-001",
+                "--no-notify",
+                env=env,
+                expected=2,
+            )
 
     def test_unknown_placeholder_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -251,7 +328,9 @@ class CliAgentJobTests(unittest.TestCase):
             )
             env = os.environ.copy()
             env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
-            result = self.run_cli("profiles", "--config", str(config), env=env, expected=2)
+            result = self.run_cli(
+                "profiles", "--config", str(config), env=env, expected=2
+            )
             self.assertIn("unknown placeholders", result.stderr)
 
     def test_builtin_profiles_include_public_cli_agents_and_metadata(self) -> None:
@@ -273,28 +352,45 @@ class CliAgentJobTests(unittest.TestCase):
             self.assertTrue(profiles["antigravity"]["supports_model"])
             self.assertTrue(profiles["antigravity"]["supports_cli_agent"])
             self.assertEqual(profiles["deepseek-harness"]["maturity"], "preview")
-            self.assertEqual(profiles["kimi-code"]["executable_candidates"], ["kimi", "kimi-cli"])
+            self.assertEqual(
+                profiles["kimi-code"]["executable_candidates"], ["kimi", "kimi-cli"]
+            )
             self.assertTrue(profiles["codex-cli"]["supports_model"])
             self.assertTrue(profiles["codex-cli"]["supports_reasoning_effort"])
             self.assertTrue(profiles["claude-code"]["supports_cli_agent"])
             routes = json.loads(self.run_cli("routes", env=env).stdout)
             self.assertEqual(
-                routes["quality-first"]["executor"]["recommended_model"], "gpt-6-astra"
+                routes["quality-first"]["executor"]["recommended_model"], "gpt-5.6-sol"
             )
-            self.assertTrue(routes["quality-first"]["executor"]["requires_explicit_selection"])
+            self.assertEqual(
+                routes["quality-first"]["executor"]["automatic_strategy"],
+                "quality-first",
+            )
             for route in routes.values():
                 self.assertEqual(route["coordinator"]["model"], "current-codex-task")
                 self.assertIn("recommended_task_model", route["coordinator"])
             self.assertEqual(
                 routes["economy-first"]["executor"]["recommended_model"], "gpt-5.6-luna"
             )
-            choices = json.loads(self.run_cli("choices", "--include-unavailable", "--json", env=env).stdout)
+            choices = json.loads(
+                self.run_cli(
+                    "choices", "--include-unavailable", "--json", env=env
+                ).stdout
+            )
             harness_names = {item["cli"] for item in choices["harnesses"]}
-            self.assertTrue({"codex-cli", "claude-code", "kimi-code", "grok"}.issubset(harness_names))
-            claude = next(item for item in choices["harnesses"] if item["cli"] == "claude-code")
+            self.assertTrue(
+                {"codex-cli", "claude-code", "kimi-code", "grok"}.issubset(
+                    harness_names
+                )
+            )
+            claude = next(
+                item for item in choices["harnesses"] if item["cli"] == "claude-code"
+            )
             self.assertEqual(claude["configured_models"], ["sonnet", "opus", "fable"])
 
-            canonical_choices = json.loads(self.run_cli("choices", "--json", env=env).stdout)
+            canonical_choices = json.loads(
+                self.run_cli("choices", "--json", env=env).stdout
+            )
             canonical_names = {item["cli"] for item in canonical_choices["harnesses"]}
             self.assertNotIn("claude", canonical_names)
 
@@ -356,7 +452,9 @@ class CliAgentJobTests(unittest.TestCase):
             )
             self.assertEqual(output["event"], "result")
             self.assertEqual(output["result"]["payload"]["event"], "user")
-            self.assertIn("# Assigned task", output["result"]["payload"]["message"]["content"])
+            self.assertIn(
+                "# Assigned task", output["result"]["payload"]["message"]["content"]
+            )
             argv = output["result"]["argv"]
             self.assertIn("--print", argv)
             self.assertIn("--sandbox", argv)
@@ -425,7 +523,9 @@ class CliAgentJobTests(unittest.TestCase):
                 encoding="utf-8",
             )
             notes = root / "review.md"
-            notes.write_text("Diff reviewed; behavior and scope match the task.\n", encoding="utf-8")
+            notes.write_text(
+                "Diff reviewed; behavior and scope match the task.\n", encoding="utf-8"
+            )
             env = os.environ.copy()
             env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
             self.install_fake_codex(root, env)
@@ -514,8 +614,12 @@ class CliAgentJobTests(unittest.TestCase):
                 env=env,
             )
             reviewed = self.run_cli("status", job_id, "--json", env=env)
-            self.assertEqual(json.loads(reviewed.stdout)["acceptance_state"], "accepted")
-            plan_status = self.run_cli("plan-status", "quality-route-test", "--json", env=env)
+            self.assertEqual(
+                json.loads(reviewed.stdout)["acceptance_state"], "accepted"
+            )
+            plan_status = self.run_cli(
+                "plan-status", "quality-route-test", "--json", env=env
+            )
             plan = json.loads(plan_status.stdout)
             self.assertTrue(plan["complete"])
             self.assertEqual(plan["items"][0]["state"], "done")
@@ -541,7 +645,10 @@ class CliAgentJobTests(unittest.TestCase):
                                 ],
                                 "prompt_transport": "file",
                                 "model_args": ["--model", "{model}"],
-                                "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
+                                "reasoning_effort_args": [
+                                    "--effort",
+                                    "{reasoning_effort}",
+                                ],
                             }
                         }
                     }
@@ -593,7 +700,9 @@ class CliAgentJobTests(unittest.TestCase):
             for source, metadata in (("launch", launch_data), ("status", status)):
                 with self.subTest(source=source):
                     self.assertEqual(metadata["route"], "quality-first")
-                    self.assertEqual(metadata["coordinator_model"], "chosen-coordinator")
+                    self.assertEqual(
+                        metadata["coordinator_model"], "chosen-coordinator"
+                    )
                     self.assertEqual(metadata["cli"], "override-worker")
                     self.assertEqual(metadata["model"], "chosen-executor")
                     self.assertEqual(metadata["reasoning_effort"], "low")
@@ -820,11 +929,12 @@ class CliAgentJobTests(unittest.TestCase):
             )
             feedback_record = json.loads(feedback.stdout)
             feedback_record["created_at"] = (
-                runner.dt.datetime.now(runner.dt.timezone.utc) - runner.dt.timedelta(seconds=61)
+                runner.dt.datetime.now(runner.dt.timezone.utc)
+                - runner.dt.timedelta(seconds=61)
             ).isoformat(timespec="seconds")
-            (root / "state" / "feedback" / "pool-feedback" / "feedback.json").write_text(
-                json.dumps(feedback_record), encoding="utf-8"
-            )
+            (
+                root / "state" / "feedback" / "pool-feedback" / "feedback.json"
+            ).write_text(json.dumps(feedback_record), encoding="utf-8")
 
             terra = self.run_cli(
                 "launch",
@@ -850,8 +960,31 @@ class CliAgentJobTests(unittest.TestCase):
             terra_data = json.loads(terra.stdout)
             self.assertTrue(terra_data["executor_approval"]["terra_fallback"])
             self.assertEqual(terra_data["reasoning_effort"], "high")
+            limited = self.run_cli(
+                "launch",
+                "--cli",
+                "cheap",
+                "--model",
+                "cheap-a",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--config",
+                str(config),
+                "--plan-id",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--no-notify",
+                env=env,
+                expected=2,
+            )
+            self.assertIn("3-attempt limit", limited.stderr)
             record = json.loads(
-                (root / "state" / "feedback" / "pool-feedback" / "feedback.json").read_text()
+                (
+                    root / "state" / "feedback" / "pool-feedback" / "feedback.json"
+                ).read_text()
             )
             self.assertEqual(record["state"], "terra_fallback_started")
 
@@ -862,6 +995,157 @@ class CliAgentJobTests(unittest.TestCase):
         self.assertTrue(policy["allowed"][0]["expensive_user_approved"])
         self.assertFalse(policy["automatic_frontier_fallback"])
 
+    def test_automatic_strategy_pools_preserve_quality_and_astra_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            plan_file = root / "plan.md"
+            self.write_plan(plan_file)
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            self.install_fake_codex(root, env)
+
+            quality = self.run_cli(
+                "create-plan",
+                "--plan-file",
+                str(plan_file),
+                "--workspace",
+                str(workspace),
+                "--title",
+                "Quality intent",
+                "--plan-id",
+                "quality-intent",
+                "--strategy",
+                "quality-first",
+                "--risk",
+                "high",
+                "--json",
+                env=env,
+            )
+            quality_plan = json.loads(quality.stdout)
+            quality_models = [
+                entry["model"] for entry in quality_plan["executor_policy"]["allowed"]
+            ]
+            self.assertEqual(quality_models[0], "gpt-5.6-sol")
+            self.assertEqual(quality_models[-1], "gpt-5.6-terra")
+            self.assertTrue(
+                set(quality_models).issubset({"gpt-5.6-sol", "opus", "gpt-5.6-terra"})
+            )
+            self.assertNotIn("gpt-6-astra", quality_models)
+            self.assertEqual(
+                quality_plan["executor_policy"]["allowed"][0]["reasoning_effort"],
+                "xhigh",
+            )
+            self.assertEqual(
+                quality_plan["goal"]["objective"],
+                "Ship the bounded feature with review evidence.",
+            )
+
+            maximum = self.run_cli(
+                "create-plan",
+                "--plan-file",
+                str(plan_file),
+                "--workspace",
+                str(workspace),
+                "--title",
+                "Maximum intent",
+                "--plan-id",
+                "maximum-intent",
+                "--strategy",
+                "maximum-quality",
+                "--json",
+                env=env,
+            )
+            maximum_plan = json.loads(maximum.stdout)
+            self.assertEqual(
+                maximum_plan["executor_policy"]["allowed"][0]["model"], "gpt-6-astra"
+            )
+            self.assertTrue(
+                maximum_plan["executor_policy"]["allowed"][0]["expensive_user_approved"]
+            )
+
+    def test_default_cost_plan_inherits_effort_and_exposes_compact_checkpoint_metrics(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            self.write_structured_task(task)
+            plan_file = root / "plan.md"
+            self.write_plan(plan_file)
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            self.install_fake_codex(root, env)
+            created = self.run_cli(
+                "create-plan",
+                "--plan-file",
+                str(plan_file),
+                "--workspace",
+                str(workspace),
+                "--title",
+                "Cost intent",
+                "--plan-id",
+                "cost-intent",
+                "--risk",
+                "low",
+                "--json",
+                env=env,
+            )
+            policy = json.loads(created.stdout)["executor_policy"]
+            self.assertEqual(policy["strategy"], "cost-first")
+            self.assertEqual(
+                [entry["model"] for entry in policy["allowed"]],
+                ["gpt-5.6-terra", "gpt-5.6-luna"],
+            )
+
+            launched = self.run_cli(
+                "launch",
+                "--cli",
+                "codex-cli",
+                "--model",
+                "gpt-5.6-terra",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--plan-id",
+                "cost-intent",
+                "--checklist-item",
+                "item-001",
+                "--no-notify",
+                "--json",
+                env=env,
+            )
+            launch_data = json.loads(launched.stdout)
+            self.assertEqual(launch_data["reasoning_effort"], "medium")
+            self.run_cli(
+                "wait",
+                launch_data["job_id"],
+                "--timeout-seconds",
+                "10",
+                "--poll-seconds",
+                "0.1",
+                "--json",
+                env=env,
+            )
+            checkpoint = json.loads(
+                self.run_cli("plan-checkpoint", "cost-intent", "--json", env=env).stdout
+            )
+            self.assertEqual(checkpoint["goal"]["strategy"], "cost-first")
+            self.assertEqual(
+                checkpoint["active_or_unreviewed_jobs"][0]["acceptance_state"],
+                "awaiting_review",
+            )
+            self.assertNotIn("task_stats", json.dumps(checkpoint))
+            metrics = json.loads(
+                self.run_cli("metrics", "--since-hours", "1", "--json", env=env).stdout
+            )
+            self.assertEqual(metrics["jobs"], 1)
+            self.assertEqual(metrics["by_executor"][0]["usage"]["input_tokens"], 12)
+
     def test_ensure_dashboard_reuses_one_detached_server(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             env = os.environ.copy()
@@ -869,7 +1153,9 @@ class CliAgentJobTests(unittest.TestCase):
             first = self.run_cli("ensure-dashboard", "--no-open", "--json", env=env)
             first_data = json.loads(first.stdout)
             try:
-                second = self.run_cli("ensure-dashboard", "--no-open", "--json", env=env)
+                second = self.run_cli(
+                    "ensure-dashboard", "--no-open", "--json", env=env
+                )
                 second_data = json.loads(second.stdout)
                 self.assertEqual(first_data["pid"], second_data["pid"])
                 self.assertEqual(first_data["url"], second_data["url"])
@@ -1012,8 +1298,12 @@ class CliAgentJobTests(unittest.TestCase):
                 env=env,
             )
             choices = json.loads(catalog.stdout)["selectable"]
-            self.assertEqual(choices["models"]["configured"], ["cheap-model", "fast-model"])
-            self.assertEqual(choices["cli_agents"]["configured"], ["builder", "reviewer"])
+            self.assertEqual(
+                choices["models"]["configured"], ["cheap-model", "fast-model"]
+            )
+            self.assertEqual(
+                choices["cli_agents"]["configured"], ["builder", "reviewer"]
+            )
             launched = self.run_cli(
                 "launch",
                 "--cli",
@@ -1054,17 +1344,20 @@ class CliAgentJobTests(unittest.TestCase):
             root = Path(temp)
             valid = root / "valid.md"
             valid.write_text(
-                "\n\n".join(f"# {heading}\nSpecific details for {heading}." for heading in (
-                    "Objective",
-                    "Why",
-                    "Scope",
-                    "Files to inspect",
-                    "Implementation guidance",
-                    "Constraints",
-                    "Acceptance criteria",
-                    "Validation",
-                    "Final report",
-                )),
+                "\n\n".join(
+                    f"# {heading}\nSpecific details for {heading}."
+                    for heading in (
+                        "Objective",
+                        "Why",
+                        "Scope",
+                        "Files to inspect",
+                        "Implementation guidance",
+                        "Constraints",
+                        "Acceptance criteria",
+                        "Validation",
+                        "Final report",
+                    )
+                ),
                 encoding="utf-8",
             )
             env = os.environ.copy()
@@ -1078,11 +1371,25 @@ class CliAgentJobTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir()
             subprocess.run(["git", "init", "-q", str(workspace)], check=True)
-            subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(workspace), "config", "user.name", "Test"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace),
+                    "config",
+                    "user.email",
+                    "test@example.com",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(workspace), "config", "user.name", "Test"], check=True
+            )
             (workspace / "seed.txt").write_text("seed\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(workspace), "add", "seed.txt"], check=True)
-            subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "seed"], check=True)
+            subprocess.run(
+                ["git", "-C", str(workspace), "commit", "-qm", "seed"], check=True
+            )
             task = root / "task.md"
             task.write_text("stay in scope\n", encoding="utf-8")
             helper = root / "drift.py"
@@ -1139,18 +1446,34 @@ class CliAgentJobTests(unittest.TestCase):
             )
             status = json.loads(waited.stdout)
             self.assertEqual(status["state"], "scope_violated")
-            self.assertIn("out-of-scope path changed: outside.txt", status["scope_violations"])
+            self.assertIn(
+                "out-of-scope path changed: outside.txt", status["scope_violations"]
+            )
 
     def test_exact_allowlist_handles_files_in_a_new_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / "workspace"
             workspace.mkdir()
             subprocess.run(["git", "init", "-q", str(workspace)], check=True)
-            subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(workspace), "config", "user.name", "Test"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace),
+                    "config",
+                    "user.email",
+                    "test@example.com",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(workspace), "config", "user.name", "Test"], check=True
+            )
             (workspace / "seed.txt").write_text("seed\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(workspace), "add", "seed.txt"], check=True)
-            subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "seed"], check=True)
+            subprocess.run(
+                ["git", "-C", str(workspace), "commit", "-qm", "seed"], check=True
+            )
             baseline = runner.git_snapshot(workspace)
             new_dir = workspace / "web"
             new_dir.mkdir()
@@ -1159,7 +1482,11 @@ class CliAgentJobTests(unittest.TestCase):
                 runner.scope_violations(
                     workspace,
                     baseline,
-                    {"allowed_paths": ["web/index.html"], "denied_paths": [], "max_changed_files": 1},
+                    {
+                        "allowed_paths": ["web/index.html"],
+                        "denied_paths": [],
+                        "max_changed_files": 1,
+                    },
                 ),
                 [],
             )

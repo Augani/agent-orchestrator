@@ -23,53 +23,55 @@ python3 <runner> ensure-dashboard --json
 This command is idempotent: it reuses the healthy local server recorded for the configured state
 home instead of opening competing dashboard processes.
 
-## Choose the worker
+## Infer the orchestration policy
 
-Treat the CLI, its model, and its internal agent/persona as separate choices. The user may specify
-any subset in natural language; preserve every explicit choice exactly. Before the first launch,
-ask the user for the bounded executor pool they authorize for this plan. Never add a model to that
-pool merely because another worker is slow, unavailable, or failed.
+The model selected for the current Codex task is always the orchestrator. Treat the CLI, executor
+model, internal agent/persona, and reasoning effort as separate choices. Preserve every explicit
+user choice exactly; explicit choices override automatic routing.
 
-1. Run `choices --json` to present installed harnesses alongside the routing flows. If the user
-   selects a harness, run `catalog --cli <name>` for its live or configured model and internal-agent
-   choices. Use `catalog --cli all --query <model-or-agent>` when the user names a model or agent but
-   not the CLI. Use `choices --include-unavailable` only for installation help.
-2. If the user chose only a CLI, show that CLI's available models and internal agents when
-   discoverable. Require an explicit model whenever the harness supports selection. Offer a
-   configured default only when the adapter cannot select a model, label it clearly, and get the
-   user's approval.
-3. If the user chose only a model or internal agent, resolve which installed CLIs offer it. If one
-   match is clear, use it; if several materially different matches remain, ask one compact choice.
-4. If the user chose neither, recommend a short pool of installed options based on task fit, price
-   information in the live catalog, maturity, required context, and supported budget controls.
-   Prefer stable profiles over preview profiles when both fit. Show every CLI/model pairing and get
-   the user's choice before persisting it. A CLI that exposes model selection must use an explicit
-   model; never rely on its configured default.
-5. Pass the chosen values independently as `--cli`, `--model`, and `--cli-agent`. Omit a dimension
-   only when that CLI cannot select it and the user knowingly approved the configured default.
-   Never invent a model ID or internal-agent name.
+Infer one strategy from the user's words:
 
-Persist normal entries with repeated `--executor CLI=MODEL`. Astra, Fable, Opus, and any model the
-catalog or user identifies as expensive/frontier must be recorded with
-`--expensive-executor CLI=MODEL`, and only after the user explicitly accepts that it may execute
-code. Planning or reviewing with a model is not consent to use it for implementation.
+- `cost-first` is the default when the user gives no cost/quality preference. It optimizes expected
+  cost per accepted change, not the lowest token price. It prefers installed Terra and Luna
+  workers with risk-based effort while keeping the same review and test gates.
+- `quality-first` applies when the user says “quality over cost”, “prioritize quality”, or an
+  equivalent. That phrase is sufficient authorization to automatically execute bounded jobs with
+  installed Sol and Opus models; Terra remains a balanced fallback in the pool. It does **not**
+  authorize Astra.
+- `maximum-quality` applies only when the user explicitly asks for maximum/frontier quality, names
+  Astra as an executor, or otherwise explicitly authorizes Astra implementation cost. It may place
+  Astra, Sol, and Opus in the installed executor pool.
+
+Never infer `maximum-quality` merely because a worker is slow, failed, or unavailable. Planning or
+reviewing with Astra is not consent to use Astra for implementation. Fable and other expensive
+models not in the automatic policy still require an explicit user-selected pool.
+
+After inspecting the repository, classify each plan as `low`, `medium`, or `high` risk. Low covers
+documentation, tests, and mechanical local edits. Medium covers a bounded feature following an
+existing pattern. High includes authentication, authorization, security, migrations, concurrency,
+public APIs, cross-module invariants, or irreversible behavior. Pass the classification to
+`create-plan`; the runner records the exact model, rank, reasoning effort, rationale, and source of
+authorization. The automatic pool only includes installed built-in harnesses.
+
+Run `choices --json` once to learn what is installed. Use `catalog --cli <name>` when the user names
+a harness, or `catalog --cli all --query <name>` when they name a model/agent without a harness.
+Ask a compact question only when an explicit choice is ambiguous, no automatic candidate is
+installed, or a product/security decision changes the result. Otherwise continue automatically.
+Never invent a model ID or internal-agent name, and never rely on a configurable model default when
+the harness supports explicit model selection.
+
+For an explicit custom pool, persist ordinary entries with repeated `--executor CLI=MODEL` and
+explicitly approved Astra, Fable, Opus, or other frontier entries with
+`--expensive-executor CLI=MODEL`. For an inferred policy, omit both executor flags and use
+`--strategy` plus `--risk`; `quality-first` itself records authorization for Sol/Opus, while only
+`maximum-quality` records authorization for Astra.
 
 When model roles matter, read
-[routing and durable plans](references/routing-and-plans.md). Present the resolved flow before
-launch and let the user choose:
-
-- `quality-first`: recommends a capable bounded executor, but requires an explicit executor and
-  separate expensive-executor approval when that recommendation is Astra.
-- `economy-first`: recommends a strong planner/orchestrator and a user-approved lower-cost executor.
-- custom: pass `--coordinator-model`, `--cli`, `--model`, and `--reasoning-effort` explicitly.
-
-The model selected for the current Codex task is always the orchestrator. The runner cannot infer
-that selection, so it records `current-codex-task` unless the user explicitly supplies
-`--coordinator-model`. Routes recommend task models but never overwrite coordinator identity,
-change the current model, or fill executor fields. Every launch requires an explicit executor that
-matches the user's allowlist. Never silently substitute the opposite flow or a frontier model.
-Either route can be combined with any installed harness by passing explicit `--cli`, `--model`,
-`--cli-agent`, and `--reasoning-effort` values.
+[routing and durable plans](references/routing-and-plans.md). The runner records
+`current-codex-task` unless the user explicitly supplies `--coordinator-model`; this is metadata and
+never changes the current Codex model. Every launch still names one exact executor and must match
+the plan's resolved allowlist. Either automatic strategy can be replaced by a custom pool using
+explicit `--cli`, `--model`, `--cli-agent`, and `--reasoning-effort` values.
 
 ```bash
 python3 <runner> catalog --cli grok --json
@@ -99,10 +101,16 @@ python3 <runner> catalog --cli all --query fast --json
 4. Run `validate-task --task-file <packet>` before launch. Keep each packet independently
    reviewable. Split unrelated work into separate jobs.
 
-For work likely to span several bounded jobs, outlive the current context, or approach the route's
-context budget, offer to create a durable plan. If the user already requested a plan or authorized
-the complete end-to-end workflow, create it without another confirmation. The plan keeps decisions
-and checklist state outside model context; bind every executor job to one checklist item.
+Every Agent Orchestrator run starts with a durable plan and goal ledger before the first executor.
+Write the plan from the user's prompt and repository evidence, including decisions, guardrails,
+validation, completion criteria, and bounded checklist items. Do not make the user transfer a plan
+from another harness. Bind every executor job to one checklist item.
+
+The plan's `goal` object is the default durable goal mechanism. Use Codex's native goal tool only
+when the user explicitly asks to set a goal, finish end-to-end, keep working until completion, or
+otherwise requests persistent autonomous pursuit. On every native-goal continuation, read
+`plan-checkpoint` first and resume from that compact record; do not reconstruct state by replaying
+the full chat, raw logs, or every historical job.
 
 Create the plan with its approved pool, or set the pool after model discovery:
 
@@ -111,10 +119,11 @@ python3 <runner> create-plan \
   --title '<title>' \
   --workspace <workspace> \
   --plan-file <plan.md> \
-  --executor 'devin=swe-2' \
-  --executor 'grok=grok-code-fast-1' \
-  --terra-fallback-after-seconds 900 \
+  --strategy quality-first \
+  --risk high \
   --json
+
+python3 <runner> plan-checkpoint <plan-id> --json
 
 python3 <runner> set-executors <plan-id> \
   --executor 'devin=swe-2' \
@@ -124,7 +133,7 @@ python3 <runner> set-executors <plan-id> \
   --json
 ```
 
-The Terra option must be disclosed when asking for the pool. Omit
+For an explicit custom pool, the Terra option must be disclosed when asking for the pool. Omit
 `--terra-fallback-after-seconds` if the user does not pre-approve it. `opencode` without `=MODEL`
 means the user explicitly accepted that harness's configured default because the adapter cannot
 select a model itself.
@@ -168,8 +177,7 @@ python3 <runner> routes
 python3 <runner> launch \
   --route quality-first \
   --cli codex-cli \
-  --model gpt-6-astra \
-  --approved-expensive-executor 'codex-cli=gpt-6-astra' \
+  --model gpt-5.6-sol \
   --plan-id <plan-id> \
   --checklist-item item-001 \
   --workspace <workspace> \
@@ -178,9 +186,10 @@ python3 <runner> launch \
   --json
 ```
 
-The example above is intentionally costly and is valid only when the user specifically chose
-Astra for execution after seeing the warning. Selecting `quality-first`, using Astra to plan, or
-using Astra to review does not provide that approval.
+The example uses the plan's automatically resolved quality-first pool and inherits the recorded
+risk-based reasoning effort when `--reasoning-effort` is omitted. To use Astra, the plan must use
+`maximum-quality` or contain an explicit expensive executor approval. Selecting `quality-first`,
+using Astra to plan, or using Astra to review does not provide that approval.
 
 Both built-in routes reject task packets above 64 KiB by default. Prefer a durable plan and smaller
 jobs over `--allow-large-context`; use the override only when decomposition would lose correctness
@@ -220,9 +229,12 @@ python3 <runner> logs <job-id> --tail 160
 python3 <runner> observe <job-id> --json
 ```
 
-Do not poll faster than every ten seconds. Relay meaningful progress, failures, or required user
-input, not repetitive unchanged status. Cancel only when requested, when a declared timeout is
-reached, or when continuing would violate scope or safety.
+Wait once for up to 45 seconds after launch. If nothing meaningful changes, yield control and let
+the dashboard and local notifications carry passive progress; do not create a tight status loop or
+repeatedly wake a long-lived coordinator. Read `observe` or logs only for a phase change, question,
+failure, completion, or specific diagnostic need. Relay deltas, not repetitive unchanged status.
+Cancel only when requested, when a declared timeout is reached, or when continuing would violate
+scope or safety.
 
 Each new job receives a `channel/channel.py` path in its task packet. The worker uses it to publish
 phase events and can ask a blocking question when ambiguity affects behavior, scope, or safety.
@@ -267,6 +279,8 @@ After a genuine failure, timeout, cancellation, or rejected result:
 
 1. Run `executor-options <plan-id> --checklist-item <item> --json`.
 2. Try an untried entry from the approved pool with a fresh bounded packet. Never leave the pool.
+   Allow at most three execution attempts for one checklist item, including repairs; then stop for
+   user direction even if another automatic candidate remains.
 3. When the pool is exhausted, ask the user in the active Codex chat **and** create the same durable
    dashboard request with `request-feedback`. State which models were tried, why each failed or was
    stopped, the cost/quality tradeoff, and the proposed next action.
@@ -315,6 +329,11 @@ token and cost snapshot. Treat missing usage as unavailable, not zero. Keep raw 
 state and bring only phase changes, questions, failures, and concise usage deltas into coordinator
 context.
 
+Use `metrics --since-hours 24 --json` when comparing local routing outcomes. Prefer cost per
+accepted result: attempts, acceptance rate, repair/scope failures, and provider-reported usage.
+Never promote a model from a tiny or mostly-unreviewed sample, and do not treat missing provider
+usage as zero cost.
+
 ## Review gate
 
 Completion by the worker is not completion of the task.
@@ -326,7 +345,9 @@ Completion by the worker is not completion of the task.
    worker's test report only as a lead.
 4. Compare behavior with every acceptance criterion and repository definition of done.
 5. If repair is bounded, write a new packet naming exact defects and failing evidence, then launch
-   one repair job from the approved pool. Prefer at most two repair passes. After that, use the
+   one repair job from the approved pool. Batch related findings into one review/repair cycle and
+   prefer at most two repair passes. Do not create a separate model review for every tiny mechanical
+   edit when the coordinator can inspect the bounded diff and deterministic test evidence. After that, use the
    failure/delay escalation flow above. Never take over implementation with the orchestrator or
    spawn a frontier executor unless the user explicitly approved that executor role.
 6. Report what was accepted, changed, tested, and still uncertain. Never imply that a worker's

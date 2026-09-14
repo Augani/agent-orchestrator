@@ -63,13 +63,87 @@ ALLOWED_PLACEHOLDERS = {
 }
 EXPENSIVE_EXECUTOR_MARKERS = ("astra", "fable", "opus")
 DEFAULT_EXECUTOR_LABEL = "<configured-default>"
+STRATEGIES = ("cost-first", "quality-first", "maximum-quality")
+RISKS = ("low", "medium", "high")
+
+AUTO_EXECUTOR_CANDIDATES: dict[str, list[dict[str, Any]]] = {
+    "cost-first": [
+        {
+            "cli": "codex-cli",
+            "model": "gpt-5.6-terra",
+            "effort": {"low": "medium", "medium": "high", "high": "xhigh"},
+        },
+        {
+            "cli": "codex-cli",
+            "model": "gpt-5.6-luna",
+            "effort": {"low": "high", "medium": "high", "high": "xhigh"},
+        },
+    ],
+    "quality-first": [
+        {
+            "cli": "codex-cli",
+            "model": "gpt-5.6-sol",
+            "effort": {"low": "medium", "medium": "high", "high": "xhigh"},
+        },
+        {
+            "cli": "claude-code",
+            "model": "opus",
+            "effort": {"low": "medium", "medium": "high", "high": "high"},
+        },
+        {
+            "cli": "codex-cli",
+            "model": "gpt-5.6-terra",
+            "effort": {"low": "high", "medium": "high", "high": "xhigh"},
+        },
+    ],
+    "maximum-quality": [
+        {
+            "cli": "codex-cli",
+            "model": "gpt-6-astra",
+            "effort": {"low": "high", "medium": "xhigh", "high": "max"},
+        },
+        {
+            "cli": "codex-cli",
+            "model": "gpt-5.6-sol",
+            "effort": {"low": "high", "medium": "high", "high": "xhigh"},
+        },
+        {
+            "cli": "claude-code",
+            "model": "opus",
+            "effort": {"low": "high", "medium": "high", "high": "high"},
+        },
+    ],
+}
 
 BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
+    "cost-first": {
+        "display_name": "Cost first",
+        "description": (
+            "Default automatic flow: preserve review gates while preferring balanced, bounded "
+            "executors and minimizing total cost per accepted change."
+        ),
+        "coordinator": {
+            "model": "current-codex-task",
+            "recommended_task_model": "gpt-5.6-luna",
+            "responsibility": "Planning, durable decisions, questions, compact checkpoints, and review.",
+        },
+        "executor": {
+            "automatic_strategy": "cost-first",
+            "recommended_cli": "codex-cli",
+            "recommended_model": "gpt-5.6-terra",
+            "session": "ephemeral",
+        },
+        "review": {
+            "required": True,
+            "policy": "Review every diff and rerun relevant tests.",
+        },
+        "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
+    },
     "quality-first": {
         "display_name": "Quality first",
         "description": (
             "Keep durable orchestration with a cost-efficient coordinator and use a fresh, "
-            "high-capability model for each bounded implementation job."
+            "high-capability Sol or Opus-class model for each bounded implementation job."
         ),
         "coordinator": {
             "model": "current-codex-task",
@@ -77,17 +151,16 @@ BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
             "responsibility": "Task decomposition, durable decisions, questions, and progress deltas.",
         },
         "executor": {
-            "requires_explicit_selection": True,
+            "automatic_strategy": "quality-first",
             "recommended_cli": "codex-cli",
-            "recommended_model": "gpt-6-astra",
+            "recommended_model": "gpt-5.6-sol",
             "recommended_reasoning_effort": "high",
-            "cost_warning": "Astra execution requires separate user-approved expensive-executor consent.",
+            "cost_warning": "Quality-over-cost authorizes Sol/Opus execution, but not Astra.",
             "session": "ephemeral",
         },
         "review": {
             "required": True,
-            "recommended_high_risk_model": "gpt-6-astra",
-            "requires_explicit_selection": True,
+            "recommended_high_risk_model": "gpt-5.6-sol",
             "policy": "Independent diff review and rerun tests before acceptance.",
         },
         "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
@@ -115,6 +188,28 @@ BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
             "recommended_high_risk_model": "gpt-6-astra",
             "requires_explicit_selection": True,
             "policy": "Coordinator reviews the diff and reruns tests before acceptance.",
+        },
+        "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
+    },
+    "maximum-quality": {
+        "display_name": "Maximum quality",
+        "description": "Explicit frontier-quality flow; may automatically use Astra, Sol, and Opus.",
+        "coordinator": {
+            "model": "current-codex-task",
+            "recommended_task_model": "gpt-6-astra",
+            "responsibility": "Architecture, durable planning, questions, compact checkpoints, and review.",
+        },
+        "executor": {
+            "automatic_strategy": "maximum-quality",
+            "recommended_cli": "codex-cli",
+            "recommended_model": "gpt-6-astra",
+            "recommended_reasoning_effort": "xhigh",
+            "cost_warning": "This route is explicit authorization for frontier executor cost.",
+            "session": "ephemeral",
+        },
+        "review": {
+            "required": True,
+            "policy": "Independent diff review and full risk-based validation.",
         },
         "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
     },
@@ -255,11 +350,11 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "prompt_transport": "stdin",
         "model_args": ["--model", "{model}"],
-        "models": ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"],
+        "models": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
         "discover_models_argv": ["codex", "debug", "models"],
         "reasoning_effort_args": [
             "--config",
-            "model_reasoning_effort=\"{reasoning_effort}\"",
+            'model_reasoning_effort="{reasoning_effort}"',
         ],
     },
     "kimi-code": {
@@ -339,8 +434,14 @@ def utc_now() -> str:
 
 
 def state_home() -> Path:
-    override = os.environ.get("AGENT_ORCHESTRATOR_HOME") or os.environ.get("CLI_AGENT_ORCHESTRATOR_HOME")
-    return Path(override).expanduser().resolve() if override else Path.home() / ".codex" / "agent-orchestrator"
+    override = os.environ.get("AGENT_ORCHESTRATOR_HOME") or os.environ.get(
+        "CLI_AGENT_ORCHESTRATOR_HOME"
+    )
+    return (
+        Path(override).expanduser().resolve()
+        if override
+        else Path.home() / ".codex" / "agent-orchestrator"
+    )
 
 
 def config_path(value: str | None) -> Path:
@@ -393,7 +494,11 @@ def local_record_files(directory: Path) -> list[Path]:
     # Worker-authored records must not redirect observations or answer writes through symlinks.
     if directory.is_symlink() or directory.parent.is_symlink():
         return []
-    return [item for item in directory.glob("*.json") if not item.is_symlink() and item.is_file()]
+    return [
+        item
+        for item in directory.glob("*.json")
+        if not item.is_symlink() and item.is_file()
+    ]
 
 
 def read_events(path: Path, limit: int = 20) -> list[dict[str, Any]]:
@@ -404,7 +509,15 @@ def read_events(path: Path, limit: int = 20) -> list[dict[str, Any]]:
     for event_path in sorted(files, key=lambda item: item.name)[-limit:]:
         try:
             event = read_json(event_path)
-            event["source"] = "worker" if (event_path.parent.parent != path or event.get("type") in {"worker_progress", "question_asked", "question_expired"}) else "runner"
+            event["source"] = (
+                "worker"
+                if (
+                    event_path.parent.parent != path
+                    or event.get("type")
+                    in {"worker_progress", "question_asked", "question_expired"}
+                )
+                else "runner"
+            )
             events.append(event)
         except RunnerError:
             continue
@@ -423,7 +536,9 @@ def read_questions(path: Path) -> list[dict[str, Any]]:
     for question_path in question_files(path):
         try:
             question = read_json(question_path)
-            if question.get("id") == question_path.stem and JOB_ID_RE.fullmatch(question_path.stem):
+            if question.get("id") == question_path.stem and JOB_ID_RE.fullmatch(
+                question_path.stem
+            ):
                 questions.append(question)
         except RunnerError:
             continue
@@ -431,7 +546,11 @@ def read_questions(path: Path) -> list[dict[str, Any]]:
 
 
 def pending_questions(path: Path) -> list[dict[str, Any]]:
-    return [question for question in read_questions(path) if question.get("state") == "pending"]
+    return [
+        question
+        for question in read_questions(path)
+        if question.get("state") == "pending"
+    ]
 
 
 @contextmanager
@@ -461,12 +580,16 @@ def validate_answer(value: str) -> str:
     return value.strip()
 
 
-def answer_record(record_path: Path, value: str, audit_path: Path, event_type: str, **details: Any) -> dict[str, Any]:
+def answer_record(
+    record_path: Path, value: str, audit_path: Path, event_type: str, **details: Any
+) -> dict[str, Any]:
     value = validate_answer(value)
     with record_lock(record_path):
         record = read_json(record_path)
         if record.get("state") != "pending":
-            raise RunnerError(f"Question is not pending; current state is {record.get('state')}")
+            raise RunnerError(
+                f"Question is not pending; current state is {record.get('state')}"
+            )
         record.update(state="answered", answer=value, answered_at=utc_now())
         write_json(record_path, record)
         add_event(audit_path, event_type, **details)
@@ -486,7 +609,9 @@ def answer_worker_question(job_id: str, question_id: str, value: str) -> dict[st
     question_path = worker_question_path(path, question_id)
     if read_json(question_path).get("id") != question_id:
         raise RunnerError("Question ID does not match its record")
-    answer_record(question_path, value, path, "question_answered", question_id=question_id)
+    answer_record(
+        question_path, value, path, "question_answered", question_id=question_id
+    )
     return {"job_id": job_id, "state": "answered", "question_id": question_id}
 
 
@@ -503,21 +628,31 @@ def read_feedback() -> list[dict[str, Any]]:
     for path in sorted((state_home() / "feedback").glob("*/feedback.json")):
         try:
             record = read_json(path)
-            if record.get("id") == path.parent.name and JOB_ID_RE.fullmatch(path.parent.name):
+            if record.get("id") == path.parent.name and JOB_ID_RE.fullmatch(
+                path.parent.name
+            ):
                 records.append(record)
         except RunnerError:
             continue
     return records
 
 
-def create_feedback(workspace: Path, question: str, context: str | None = None,
-                    plan_id: str | None = None, checklist_item: str | None = None,
-                    feedback_id: str | None = None, notify: bool = True) -> dict[str, Any]:
+def create_feedback(
+    workspace: Path,
+    question: str,
+    context: str | None = None,
+    plan_id: str | None = None,
+    checklist_item: str | None = None,
+    feedback_id: str | None = None,
+    notify: bool = True,
+) -> dict[str, Any]:
     workspace = workspace.expanduser().resolve()
     if not workspace.is_dir():
         raise RunnerError("Workspace must be an existing directory")
     question = validate_answer(question)
-    if context is not None and (not isinstance(context, str) or len(context.encode("utf-8")) > MAX_TASK_BYTES):
+    if context is not None and (
+        not isinstance(context, str) or len(context.encode("utf-8")) > MAX_TASK_BYTES
+    ):
         raise RunnerError("Context must be text of at most 1000000 bytes")
     if checklist_item and not plan_id:
         raise RunnerError("--checklist-item requires --plan-id")
@@ -525,7 +660,9 @@ def create_feedback(workspace: Path, question: str, context: str | None = None,
         _, plan = read_plan(plan_id)
         if Path(plan["workspace"]).resolve() != workspace:
             raise RunnerError("Feedback workspace must match the linked plan")
-        if checklist_item and not any(item.get("id") == checklist_item for item in plan.get("items", [])):
+        if checklist_item and not any(
+            item.get("id") == checklist_item for item in plan.get("items", [])
+        ):
             raise RunnerError("Unknown checklist item")
     selected_id = feedback_id or make_job_id("feedback")
     path = feedback_dir(selected_id, must_exist=False)
@@ -536,10 +673,18 @@ def create_feedback(workspace: Path, question: str, context: str | None = None,
         path.mkdir(mode=0o700)
     except FileExistsError as exc:
         raise RunnerError(f"Feedback already exists: {selected_id}") from exc
-    record = {"id": selected_id, "state": "pending", "source": "orchestrator",
-              "question": question, "context": context, "workspace": str(workspace),
-              "project_name": workspace.name or "Workspace", "plan_id": plan_id,
-              "checklist_item": checklist_item, "created_at": utc_now()}
+    record = {
+        "id": selected_id,
+        "state": "pending",
+        "source": "orchestrator",
+        "question": question,
+        "context": context,
+        "workspace": str(workspace),
+        "project_name": workspace.name or "Workspace",
+        "plan_id": plan_id,
+        "checklist_item": checklist_item,
+        "created_at": utc_now(),
+    }
     write_json(path / "feedback.json", record)
     add_event(path, "feedback_requested", feedback_id=selected_id)
     if notify:
@@ -549,12 +694,25 @@ def create_feedback(workspace: Path, question: str, context: str | None = None,
 
 def answer_feedback(feedback_id: str, value: str) -> dict[str, Any]:
     path = feedback_dir(feedback_id)
-    return answer_record(path / "feedback.json", value, path, "feedback_answered", feedback_id=feedback_id)
+    return answer_record(
+        path / "feedback.json",
+        value,
+        path,
+        "feedback_answered",
+        feedback_id=feedback_id,
+    )
 
 
 def command_request_feedback(args: argparse.Namespace) -> int:
-    record = create_feedback(Path(args.workspace), question_text(args), args.context,
-                             args.plan_id, args.checklist_item, args.feedback_id, args.notify)
+    record = create_feedback(
+        Path(args.workspace),
+        question_text(args),
+        args.context,
+        args.plan_id,
+        args.checklist_item,
+        args.feedback_id,
+        args.notify,
+    )
     print(json.dumps(record, indent=2, sort_keys=True))
     return 0
 
@@ -563,7 +721,11 @@ def command_feedback(args: argparse.Namespace) -> int:
     records = read_feedback()
     if args.workspace:
         workspace = Path(args.workspace).expanduser().resolve()
-        records = [record for record in records if Path(record["workspace"]).resolve() == workspace]
+        records = [
+            record
+            for record in records
+            if Path(record["workspace"]).resolve() == workspace
+        ]
     if not args.all:
         records = [record for record in records if record.get("state") == "pending"]
     print(json.dumps(records, indent=2, sort_keys=True))
@@ -571,7 +733,13 @@ def command_feedback(args: argparse.Namespace) -> int:
 
 
 def command_answer_feedback(args: argparse.Namespace) -> int:
-    print(json.dumps(answer_feedback(args.feedback_id, answer_text(args)), indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            answer_feedback(args.feedback_id, answer_text(args)),
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -608,7 +776,7 @@ def write_channel_wrapper(path: Path, job_id: str) -> Path:
     path.mkdir(mode=0o700)
     wrapper = path / "channel.py"
     runner = str(Path(__file__).resolve())
-    content = f'''#!/usr/bin/env python3
+    content = f"""#!/usr/bin/env python3
 import os
 import sys
 
@@ -619,7 +787,7 @@ os.environ["AGENT_ORCHESTRATOR_HOME"] = {str(state_home())!r}
 if len(sys.argv) < 2 or sys.argv[1] not in {{"ask", "event"}}:
     raise SystemExit("usage: channel.py <ask|event> [arguments]")
 os.execv(sys.executable, [sys.executable, RUNNER, sys.argv[1], JOB_ID, *sys.argv[2:]])
-'''
+"""
     wrapper.write_text(content, encoding="utf-8")
     os.chmod(wrapper, 0o700)
     return wrapper
@@ -690,7 +858,9 @@ def validate_named_sections(text: str, required_sections: tuple[str, ...]) -> li
 
 def task_packet_stats(text: str) -> dict[str, Any]:
     path_mentions = sorted(
-        set(re.findall(r"(?m)(?:^|[`\s])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*/-]+)+)", text))
+        set(
+            re.findall(r"(?m)(?:^|[`\s])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*/-]+)+)", text)
+        )
     )
     return {
         "bytes": len(text.encode("utf-8")),
@@ -721,7 +891,11 @@ def command_validate_task(args: argparse.Namespace) -> int:
 
 
 def validate_string_list(value: Any, label: str) -> list[str]:
-    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) for item in value)
+    ):
         raise RunnerError(f"{label} must be a non-empty array of strings")
     return list(value)
 
@@ -752,13 +926,17 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
     }
     unknown_keys = sorted(set(raw) - allowed_keys)
     if unknown_keys:
-        raise RunnerError(f"Profile {name!r} has unsupported fields: {', '.join(unknown_keys)}")
+        raise RunnerError(
+            f"Profile {name!r} has unsupported fields: {', '.join(unknown_keys)}"
+        )
     profile: dict[str, Any] = {
         "argv": validate_string_list(raw.get("argv"), f"{name}.argv"),
         "prompt_transport": raw.get("prompt_transport"),
     }
     if profile["prompt_transport"] not in {"file", "stdin", "jsonl-stdin", "arg"}:
-        raise RunnerError(f"{name}.prompt_transport must be file, stdin, jsonl-stdin, or arg")
+        raise RunnerError(
+            f"{name}.prompt_transport must be file, stdin, jsonl-stdin, or arg"
+        )
     for key in ("display_name", "description", "docs_url", "install_hint"):
         if key in raw:
             if not isinstance(raw[key], str) or not raw[key].strip():
@@ -792,11 +970,20 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "discover_models_argv",
         "discover_cli_agents_argv",
     }
-    tokens = [token for key, values in profile.items() if key in command_keys for token in values]
-    placeholders = {match for token in tokens for match in PLACEHOLDER_RE.findall(token)}
+    tokens = [
+        token
+        for key, values in profile.items()
+        if key in command_keys
+        for token in values
+    ]
+    placeholders = {
+        match for token in tokens for match in PLACEHOLDER_RE.findall(token)
+    }
     unknown_placeholders = sorted(placeholders - ALLOWED_PLACEHOLDERS)
     if unknown_placeholders:
-        raise RunnerError(f"Profile {name!r} has unknown placeholders: {', '.join(unknown_placeholders)}")
+        raise RunnerError(
+            f"Profile {name!r} has unknown placeholders: {', '.join(unknown_placeholders)}"
+        )
     if profile["prompt_transport"] == "file" and "prompt_file" not in placeholders:
         raise RunnerError(f"File profile {name!r} must use {{prompt_file}}")
     if profile["prompt_transport"] == "arg" and "prompt_text" not in placeholders:
@@ -815,7 +1002,9 @@ def resolve_profile_executable(profile: dict[str, Any]) -> tuple[str, str | None
 
 
 def load_profiles(custom_path: Path | None) -> dict[str, dict[str, Any]]:
-    profiles = {name: validate_profile(name, raw) for name, raw in BUILTIN_PROFILES.items()}
+    profiles = {
+        name: validate_profile(name, raw) for name, raw in BUILTIN_PROFILES.items()
+    }
     if custom_path and custom_path.exists():
         document = read_json(custom_path)
         agents = document.get("agents")
@@ -866,7 +1055,9 @@ def parse_executor_spec(value: str, expensive_approved: bool = False) -> dict[st
         cli, model = raw, None
     if not AGENT_NAME_RE.fullmatch(cli):
         raise RunnerError(f"Invalid executor CLI in {value!r}")
-    if model is not None and (len(model) > 256 or any(ord(char) < 32 for char in model)):
+    if model is not None and (
+        len(model) > 256 or any(ord(char) < 32 for char in model)
+    ):
         raise RunnerError(f"Invalid executor model in {value!r}")
     if is_expensive_executor_model(model) and not expensive_approved:
         raise RunnerError(
@@ -876,7 +1067,9 @@ def parse_executor_spec(value: str, expensive_approved: bool = False) -> dict[st
     return {
         "cli": cli,
         "model": model,
-        "display": f"{cli}={model}" if model is not None else f"{cli}={DEFAULT_EXECUTOR_LABEL}",
+        "display": (
+            f"{cli}={model}" if model is not None else f"{cli}={DEFAULT_EXECUTOR_LABEL}"
+        ),
         "expensive_user_approved": bool(expensive_approved),
     }
 
@@ -886,10 +1079,18 @@ def executor_policy(
     expensive_executor_values: list[str],
     terra_fallback_after_seconds: int | None = None,
 ) -> dict[str, Any]:
-    if terra_fallback_after_seconds is not None and not 60 <= terra_fallback_after_seconds <= 86_400:
-        raise RunnerError("Terra fallback grace period must be between 60 and 86400 seconds")
+    if (
+        terra_fallback_after_seconds is not None
+        and not 60 <= terra_fallback_after_seconds <= 86_400
+    ):
+        raise RunnerError(
+            "Terra fallback grace period must be between 60 and 86400 seconds"
+        )
     entries = [parse_executor_spec(value) for value in executor_values]
-    entries.extend(parse_executor_spec(value, expensive_approved=True) for value in expensive_executor_values)
+    entries.extend(
+        parse_executor_spec(value, expensive_approved=True)
+        for value in expensive_executor_values
+    )
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str, str | None]] = set()
     for entry in entries:
@@ -899,7 +1100,9 @@ def executor_policy(
         seen.add(key)
         unique.append(entry)
     if terra_fallback_after_seconds is not None and not unique:
-        raise RunnerError("Terra fallback requires at least one primary executor to exhaust first")
+        raise RunnerError(
+            "Terra fallback requires at least one primary executor to exhaust first"
+        )
     fallback = {
         "enabled": terra_fallback_after_seconds is not None,
         "cli": "codex-cli",
@@ -925,7 +1128,69 @@ def executor_policy(
     }
 
 
-def executor_selection_matches(entry: dict[str, Any], cli: str, model: str | None) -> bool:
+def automatic_executor_policy(
+    strategy: str, risk: str, profiles: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Resolve a bounded executor pool from explicit orchestration intent and installed CLIs."""
+    if strategy not in STRATEGIES:
+        raise RunnerError(f"Unknown strategy: {strategy}")
+    if risk not in RISKS:
+        raise RunnerError(f"Unknown risk: {risk}")
+    authorization_source = {
+        "cost-first": "default_cost_first_policy",
+        "quality-first": "user_requested_quality_over_cost",
+        "maximum-quality": "user_requested_maximum_or_frontier_quality",
+    }[strategy]
+    allowed: list[dict[str, Any]] = []
+    for candidate in AUTO_EXECUTOR_CANDIDATES[strategy]:
+        profile = profiles.get(candidate["cli"])
+        if not profile or not resolve_profile_executable(profile)[1]:
+            continue
+        model = candidate["model"]
+        if "model_args" not in profile or model not in profile.get("models", []):
+            continue
+        if "astra" in model.casefold() and strategy != "maximum-quality":
+            continue
+        allowed.append(
+            {
+                "cli": candidate["cli"],
+                "model": model,
+                "display": f"{candidate['cli']}={model}",
+                "reasoning_effort": candidate["effort"][risk],
+                "rank": len(allowed) + 1,
+                "auto_selected": True,
+                "authorization_source": authorization_source,
+                "expensive_user_approved": bool(
+                    is_expensive_executor_model(model)
+                    and strategy in {"quality-first", "maximum-quality"}
+                ),
+                "selection_reason": (
+                    f"Installed {strategy} candidate for {risk}-risk bounded execution"
+                ),
+            }
+        )
+    if not allowed:
+        raise RunnerError(
+            f"No installed executor matches the automatic {strategy} policy. "
+            "Run choices/catalog and provide an explicit executor pool."
+        )
+    return {
+        "mode": "automatic_strategy_allowlist",
+        "strategy": strategy,
+        "risk": risk,
+        "authorization_source": authorization_source,
+        "allowed": allowed,
+        "on_exhausted": "request_user_approval",
+        "automatic_frontier_fallback": False,
+        "fallback": {"enabled": False},
+        "max_attempts_per_item": 3,
+        "updated_at": utc_now(),
+    }
+
+
+def executor_selection_matches(
+    entry: dict[str, Any], cli: str, model: str | None
+) -> bool:
     return entry.get("cli") == cli and entry.get("model") == model
 
 
@@ -958,7 +1223,9 @@ def validate_executor_selection(
             "default cannot silently select an expensive executor"
         )
     if "model_args" not in profile and args.model:
-        raise RunnerError(f"Selected CLI {args.cli} does not support explicit model selection")
+        raise RunnerError(
+            f"Selected CLI {args.cli} does not support explicit model selection"
+        )
 
     if plan is not None:
         if args.approved_executor or args.approved_expensive_executor:
@@ -968,7 +1235,9 @@ def validate_executor_selection(
             )
         policy = plan.get("executor_policy") or {}
     else:
-        policy = executor_policy(args.approved_executor, args.approved_expensive_executor)
+        policy = executor_policy(
+            args.approved_executor, args.approved_expensive_executor
+        )
 
     allowed = policy.get("allowed", [])
     if not allowed:
@@ -978,7 +1247,9 @@ def validate_executor_selection(
             "Set a bounded executor pool before launching; automatic fallback is disabled."
         )
     matching = [
-        entry for entry in allowed if executor_selection_matches(entry, args.cli, args.model)
+        entry
+        for entry in allowed
+        if executor_selection_matches(entry, args.cli, args.model)
     ]
     fallback = policy.get("fallback") or {}
     using_terra_fallback = bool(
@@ -993,7 +1264,9 @@ def validate_executor_selection(
             f"Allowed executors: {approved}. Update the pool only after asking the user."
         )
     entry = selected_executor_approval(policy, args.cli, args.model)
-    if is_expensive_executor_model(args.model) and not entry.get("expensive_user_approved"):
+    if is_expensive_executor_model(args.model) and not entry.get(
+        "expensive_user_approved"
+    ):
         raise RunnerError(
             f"Executor {args.cli}={args.model} requires explicit expensive-executor approval"
         )
@@ -1031,7 +1304,9 @@ def replace_placeholders(tokens: list[str], values: dict[str, str]) -> list[str]
             expanded = expanded.replace("{" + key + "}", value)
         unresolved = PLACEHOLDER_RE.findall(expanded)
         if unresolved:
-            raise RunnerError(f"Missing values for placeholders: {', '.join(sorted(set(unresolved)))}")
+            raise RunnerError(
+                f"Missing values for placeholders: {', '.join(sorted(set(unresolved)))}"
+            )
         result.append(expanded)
     return result
 
@@ -1059,9 +1334,24 @@ def build_command(
     argv[0] = found or executable
     controls = (
         (model, "model_args", "model", str(model) if model is not None else ""),
-        (cli_agent, "cli_agent_args", "cli_agent", str(cli_agent) if cli_agent is not None else ""),
-        (max_turns, "max_turns_args", "max_turns", str(max_turns) if max_turns is not None else ""),
-        (max_cost_usd, "cost_args", "max_cost_usd", str(max_cost_usd) if max_cost_usd is not None else ""),
+        (
+            cli_agent,
+            "cli_agent_args",
+            "cli_agent",
+            str(cli_agent) if cli_agent is not None else "",
+        ),
+        (
+            max_turns,
+            "max_turns_args",
+            "max_turns",
+            str(max_turns) if max_turns is not None else "",
+        ),
+        (
+            max_cost_usd,
+            "cost_args",
+            "max_cost_usd",
+            str(max_cost_usd) if max_cost_usd is not None else "",
+        ),
         (
             reasoning_effort,
             "reasoning_effort_args",
@@ -1073,7 +1363,9 @@ def build_command(
         if requested is None:
             continue
         if profile_key not in profile:
-            raise RunnerError(f"Selected CLI does not support requested control: {value_key}")
+            raise RunnerError(
+                f"Selected CLI does not support requested control: {value_key}"
+            )
         values[value_key] = string_value
         argv.extend(profile[profile_key])
     command = replace_placeholders(argv, values)
@@ -1098,7 +1390,14 @@ def git_snapshot(workspace: Path) -> dict[str, Any]:
         check=False,
     )
     status = subprocess.run(
-        ["git", "-C", str(workspace), "status", "--porcelain=v1", "--untracked-files=all"],
+        [
+            "git",
+            "-C",
+            str(workspace),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
         capture_output=True,
         text=True,
         timeout=15,
@@ -1125,13 +1424,21 @@ def status_paths(status_lines: list[str]) -> set[str]:
     return paths
 
 
-def scope_violations(workspace: Path, baseline: dict[str, Any], scope: dict[str, Any]) -> list[str]:
-    if not scope.get("allowed_paths") and not scope.get("denied_paths") and scope.get("max_changed_files") is None:
+def scope_violations(
+    workspace: Path, baseline: dict[str, Any], scope: dict[str, Any]
+) -> list[str]:
+    if (
+        not scope.get("allowed_paths")
+        and not scope.get("denied_paths")
+        and scope.get("max_changed_files") is None
+    ):
         return []
     if not baseline.get("is_git"):
         return []
     current = git_snapshot(workspace)
-    changed = status_paths(current.get("status", [])) - status_paths(baseline.get("status", []))
+    changed = status_paths(current.get("status", [])) - status_paths(
+        baseline.get("status", [])
+    )
     allowed = scope.get("allowed_paths", [])
     denied = scope.get("denied_paths", [])
     violations: list[str] = []
@@ -1181,6 +1488,16 @@ def plan_items(text: str) -> list[dict[str, Any]]:
     ]
 
 
+def named_section_body(text: str, name: str) -> str:
+    matches = list(re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", text))
+    for index, match in enumerate(matches):
+        if match.group(1).strip().casefold() != name.casefold():
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        return text[match.end() : end].strip()
+    return ""
+
+
 def read_plan(plan_id: str) -> tuple[Path, dict[str, Any]]:
     path = plan_dir(plan_id)
     return path, read_json(path / "plan.json")
@@ -1196,6 +1513,10 @@ def save_plan(path: Path, plan: dict[str, Any]) -> None:
     plan["complete"] = bool(plan.get("items")) and all(
         item.get("state") == "done" for item in plan["items"]
     )
+    goal = plan.get("goal")
+    if isinstance(goal, dict):
+        goal["status"] = "complete" if plan["complete"] else "active"
+        goal["updated_at"] = plan["updated_at"]
     write_json(path / "plan.json", plan)
 
 
@@ -1215,7 +1536,10 @@ def command_create_plan(args: argparse.Namespace) -> int:
         problems.append("Checklist must contain at least one '- [ ]' item")
     if problems:
         raise RunnerError("Plan is incomplete: " + "; ".join(problems))
-    selected_plan_id = args.plan_id or f"plan-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+    selected_plan_id = (
+        args.plan_id
+        or f"plan-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+    )
     path = plan_dir(selected_plan_id, must_exist=False)
     if path.exists():
         raise RunnerError(f"Plan already exists: {selected_plan_id}")
@@ -1223,6 +1547,24 @@ def command_create_plan(args: argparse.Namespace) -> int:
     plan_copy = path / "plan.md"
     shutil.copyfile(source, plan_copy)
     os.chmod(plan_copy, 0o600)
+    if args.executor or args.expensive_executor:
+        policy = executor_policy(
+            args.executor, args.expensive_executor, args.terra_fallback_after_seconds
+        )
+        policy.update(
+            strategy=args.strategy,
+            risk=args.risk,
+            authorization_source="explicit_executor_allowlist",
+            max_attempts_per_item=3,
+        )
+    else:
+        if args.terra_fallback_after_seconds is not None:
+            raise RunnerError(
+                "Automatic executor selection does not use a separate Terra fallback"
+            )
+        policy = automatic_executor_policy(
+            args.strategy, args.risk, load_profiles(config_path(args.config))
+        )
     plan = {
         "plan_id": selected_plan_id,
         "title": args.title,
@@ -1230,14 +1572,21 @@ def command_create_plan(args: argparse.Namespace) -> int:
         "created_at": utc_now(),
         "plan_file": str(plan_copy),
         "plan_sha256": hashlib.sha256(plan_copy.read_bytes()).hexdigest(),
-        "executor_policy": executor_policy(
-            args.executor, args.expensive_executor, args.terra_fallback_after_seconds
-        ),
+        "goal": {
+            "objective": named_section_body(text, "Goal"),
+            "status": "active",
+            "strategy": args.strategy,
+            "risk": args.risk,
+            "created_at": utc_now(),
+        },
+        "executor_policy": policy,
         "items": items,
     }
     save_plan(path, plan)
     output = read_json(path / "plan.json")
-    print(json.dumps(output, indent=2, sort_keys=True) if args.json else selected_plan_id)
+    print(
+        json.dumps(output, indent=2, sort_keys=True) if args.json else selected_plan_id
+    )
     return 0
 
 
@@ -1252,10 +1601,198 @@ def command_plan_status(args: argparse.Namespace) -> int:
         policy = plan.get("executor_policy", {})
         approved = policy.get("allowed", [])
         print("executor_policy: allowlist_only")
-        print("approved_executors: " + (", ".join(item["display"] for item in approved) or "none"))
-        print(f"automatic_frontier_fallback: {policy.get('automatic_frontier_fallback', False)}")
+        print(
+            "approved_executors: "
+            + (", ".join(item["display"] for item in approved) or "none")
+        )
+        print(
+            f"automatic_frontier_fallback: {policy.get('automatic_frontier_fallback', False)}"
+        )
         for item in plan.get("items", []):
             print(f"{item['id']}\t{item['state']}\t{item['title']}")
+    return 0
+
+
+USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+    "total_cost_usd",
+    "cost_usd",
+    "duration_ms",
+)
+
+
+def add_usage_totals(target: dict[str, float], usage: Any) -> bool:
+    if not isinstance(usage, dict):
+        return False
+    found = False
+    for key in USAGE_FIELDS:
+        value = usage.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            target[key] = target.get(key, 0) + value
+            found = True
+    return found
+
+
+def compact_job_status(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: status.get(key)
+        for key in (
+            "job_id",
+            "checklist_item",
+            "cli",
+            "model",
+            "reasoning_effort",
+            "execution_state",
+            "acceptance_state",
+            "current_phase",
+            "attention_required",
+            "created_at",
+            "finished_at",
+        )
+    }
+
+
+def command_plan_checkpoint(args: argparse.Namespace) -> int:
+    _, plan = read_plan(args.plan_id)
+    jobs: list[dict[str, Any]] = []
+    usage: dict[str, float] = {}
+    for item in plan.get("items", []):
+        for job_id in item.get("job_ids", []):
+            try:
+                status = get_status(job_dir(job_id))
+            except RunnerError:
+                continue
+            jobs.append(compact_job_status(status))
+            add_usage_totals(usage, status.get("usage_summary"))
+    pending = [
+        {
+            "id": record.get("id"),
+            "checklist_item": record.get("checklist_item"),
+            "question": record.get("question"),
+            "created_at": record.get("created_at"),
+        }
+        for record in read_feedback()
+        if record.get("plan_id") == args.plan_id and record.get("state") == "pending"
+    ]
+    unfinished = [item for item in plan.get("items", []) if item.get("state") != "done"]
+    output = {
+        "plan_id": args.plan_id,
+        "title": plan.get("title"),
+        "workspace": plan.get("workspace"),
+        "goal": plan.get("goal"),
+        "complete": plan.get("complete", False),
+        "counts": plan.get("counts", {}),
+        "next_item": unfinished[0] if unfinished else None,
+        "completed_items": [
+            {"id": item.get("id"), "title": item.get("title")}
+            for item in plan.get("items", [])
+            if item.get("state") == "done"
+        ],
+        "active_or_unreviewed_jobs": [
+            job
+            for job in jobs
+            if job.get("execution_state") in {"starting", "running"}
+            or job.get("acceptance_state") == "awaiting_review"
+            or job.get("attention_required")
+        ],
+        "pending_feedback": pending,
+        "usage_summary": usage or None,
+        "continuation_contract": (
+            "Resume from this checkpoint and the named plan item; do not replay raw logs or the "
+            "full coordinator transcript unless the checkpoint identifies missing evidence."
+        ),
+    }
+    print(
+        json.dumps(output, indent=2, sort_keys=True)
+        if args.json
+        else json.dumps(output, sort_keys=True)
+    )
+    return 0
+
+
+def command_metrics(args: argparse.Namespace) -> int:
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=args.since_hours)
+    workspace = Path(args.workspace).expanduser().resolve() if args.workspace else None
+    groups: dict[tuple[str, str | None], dict[str, Any]] = {}
+    total_usage: dict[str, float] = {}
+    total_jobs = 0
+    for path in jobs_dir().glob("*"):
+        if not path.is_dir() or not (path / "meta.json").is_file():
+            continue
+        try:
+            status = get_status(path)
+            created = dt.datetime.fromisoformat(status["created_at"])
+        except (RunnerError, KeyError, TypeError, ValueError):
+            continue
+        if created < cutoff:
+            continue
+        if workspace and Path(status.get("workspace", "")).resolve() != workspace:
+            continue
+        total_jobs += 1
+        key = (
+            status.get("cli") or status.get("agent") or "unknown",
+            status.get("model"),
+        )
+        group = groups.setdefault(
+            key,
+            {
+                "cli": key[0],
+                "model": key[1],
+                "jobs": 0,
+                "execution_states": {},
+                "acceptance_states": {},
+                "provider_usage_jobs": 0,
+                "usage": {},
+            },
+        )
+        group["jobs"] += 1
+        for field, bucket in (
+            ("execution_state", "execution_states"),
+            ("acceptance_state", "acceptance_states"),
+        ):
+            value = status.get(field) or "unknown"
+            group[bucket][value] = group[bucket].get(value, 0) + 1
+        if add_usage_totals(group["usage"], status.get("usage_summary")):
+            group["provider_usage_jobs"] += 1
+            add_usage_totals(total_usage, status.get("usage_summary"))
+    rows = []
+    for group in groups.values():
+        reviewed = sum(
+            group["acceptance_states"].get(state, 0)
+            for state in ("accepted", "repair_required", "rejected")
+        )
+        group["reviewed_acceptance_rate"] = (
+            round(group["acceptance_states"].get("accepted", 0) / reviewed, 4)
+            if reviewed
+            else None
+        )
+        usage = group["usage"]
+        if "input_tokens" in usage:
+            usage["uncached_input_tokens"] = max(
+                0, usage["input_tokens"] - usage.get("cached_input_tokens", 0)
+            )
+        rows.append(group)
+    rows.sort(key=lambda row: (-row["jobs"], row["cli"], row.get("model") or ""))
+    output = {
+        "since_hours": args.since_hours,
+        "workspace": str(workspace) if workspace else None,
+        "jobs": total_jobs,
+        "usage": total_usage or None,
+        "by_executor": rows,
+        "interpretation": (
+            "Compare attempts, accepted outcomes, repair rates, and provider-reported usage; "
+            "do not choose a route from token price alone."
+        ),
+    }
+    print(
+        json.dumps(output, indent=2, sort_keys=True)
+        if args.json
+        else json.dumps(output, sort_keys=True)
+    )
     return 0
 
 
@@ -1280,13 +1817,17 @@ def command_set_executors(args: argparse.Namespace) -> int:
             "pre-approved Terra fallback."
         ),
     }
-    print(json.dumps(output, indent=2, sort_keys=True) if args.json else ", ".join(
-        entry["display"] for entry in policy["allowed"]
-    ))
+    print(
+        json.dumps(output, indent=2, sort_keys=True)
+        if args.json
+        else ", ".join(entry["display"] for entry in policy["allowed"])
+    )
     return 0
 
 
-def executor_options_for_item(plan: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+def executor_options_for_item(
+    plan: dict[str, Any], item: dict[str, Any]
+) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     attempts_by_key: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
     for job_id in item.get("job_ids", []):
@@ -1307,9 +1848,17 @@ def executor_options_for_item(plan: dict[str, Any], item: dict[str, Any]) -> dic
     policy = plan.get("executor_policy") or {}
     allowed = policy.get("allowed", [])
     untried = [
-        entry for entry in allowed if (entry.get("cli"), entry.get("model")) not in attempts_by_key
+        entry
+        for entry in allowed
+        if (entry.get("cli"), entry.get("model")) not in attempts_by_key
     ]
-    terminal_execution_failures = {"failed", "timed_out", "cancelled", "scope_violated", "lost"}
+    terminal_execution_failures = {
+        "failed",
+        "timed_out",
+        "cancelled",
+        "scope_violated",
+        "lost",
+    }
     terminal_review_failures = {"repair_required", "rejected"}
 
     def is_terminal_failure(attempt: dict[str, Any]) -> bool:
@@ -1323,7 +1872,9 @@ def executor_options_for_item(plan: dict[str, Any], item: dict[str, Any]) -> dic
     for entry in allowed:
         key = (entry.get("cli"), entry.get("model"))
         entry_attempts = attempts_by_key.get(key, [])
-        if entry_attempts and all(is_terminal_failure(attempt) for attempt in entry_attempts):
+        if entry_attempts and all(
+            is_terminal_failure(attempt) for attempt in entry_attempts
+        ):
             exhausted_entries.append(entry)
     return {
         "plan_id": plan["plan_id"],
@@ -1341,11 +1892,19 @@ def executor_options_for_item(plan: dict[str, Any], item: dict[str, Any]) -> dic
 
 def command_executor_options(args: argparse.Namespace) -> int:
     _, plan = read_plan(args.plan_id)
-    matching = [item for item in plan.get("items", []) if item.get("id") == args.checklist_item]
+    matching = [
+        item for item in plan.get("items", []) if item.get("id") == args.checklist_item
+    ]
     if not matching:
-        raise RunnerError(f"Unknown checklist item {args.checklist_item!r} in plan {args.plan_id}")
+        raise RunnerError(
+            f"Unknown checklist item {args.checklist_item!r} in plan {args.plan_id}"
+        )
     output = executor_options_for_item(plan, matching[0])
-    print(json.dumps(output, indent=2, sort_keys=True) if args.json else json.dumps(output, sort_keys=True))
+    print(
+        json.dumps(output, indent=2, sort_keys=True)
+        if args.json
+        else json.dumps(output, sort_keys=True)
+    )
     return 0
 
 
@@ -1377,7 +1936,9 @@ def validate_terra_fallback(
             f"Approved executor pool is not exhausted; try these entries before Terra: {remaining}"
         )
     if options["unresolved_attempts"]:
-        job_ids = ", ".join(attempt["job_id"] for attempt in options["unresolved_attempts"])
+        job_ids = ", ".join(
+            attempt["job_id"] for attempt in options["unresolved_attempts"]
+        )
         raise RunnerError(
             "Approved executor pool is not exhausted; these jobs are still active, awaiting "
             f"review, or accepted: {job_ids}"
@@ -1399,7 +1960,9 @@ def validate_terra_fallback(
         or record.get("checklist_item") != item["id"]
         or Path(record.get("workspace", "")).resolve() != workspace
     ):
-        raise RunnerError("Fallback feedback does not belong to this plan item and workspace")
+        raise RunnerError(
+            "Fallback feedback does not belong to this plan item and workspace"
+        )
     try:
         created = dt.datetime.fromisoformat(record["created_at"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -1433,7 +1996,9 @@ def claim_feedback_for_fallback(feedback_id: str, job_id: str) -> None:
             fallback_started_at=utc_now(),
         )
         write_json(record_path, record)
-        add_event(path, "terra_fallback_started", feedback_id=feedback_id, job_id=job_id)
+        add_event(
+            path, "terra_fallback_started", feedback_id=feedback_id, job_id=job_id
+        )
 
 
 def bind_plan_item(plan_id: str, item_id: str, job_id: str) -> None:
@@ -1486,9 +2051,14 @@ def usage_summary(log_path: Path) -> dict[str, Any] | None:
                     if isinstance(node, dict):
                         for key, child in node.items():
                             normalized = key.casefold()
-                            if isinstance(child, (int, float)) and not isinstance(child, bool) and (
-                                "token" in normalized
-                                or normalized in {"total_cost_usd", "cost_usd", "duration_ms"}
+                            if (
+                                isinstance(child, (int, float))
+                                and not isinstance(child, bool)
+                                and (
+                                    "token" in normalized
+                                    or normalized
+                                    in {"total_cost_usd", "cost_usd", "duration_ms"}
+                                )
                             ):
                                 fields[key] = child
                             elif isinstance(child, (dict, list)):
@@ -1513,14 +2083,20 @@ def get_status(path: Path) -> dict[str, Any]:
         status = {**meta, **result}
     else:
         worker_alive = pid_alive(meta.get("worker_pid"))
-        state = "cancelling" if (path / "cancel-requested").exists() and worker_alive else "running" if worker_alive else "lost"
+        state = (
+            "cancelling"
+            if (path / "cancel-requested").exists() and worker_alive
+            else "running" if worker_alive else "lost"
+        )
         status = {**meta, "state": state}
     review_path = path / "review.json"
     review = read_json(review_path) if review_path.exists() else None
     status["review"] = review
     if status["state"] == "succeeded":
         status["review_state"] = review.get("verdict") if review else "required"
-        status["acceptance_state"] = review.get("verdict") if review else "awaiting_review"
+        status["acceptance_state"] = (
+            review.get("verdict") if review else "awaiting_review"
+        )
     else:
         status["review_state"] = review.get("verdict") if review else "not_ready"
         status["acceptance_state"] = "not_accepted"
@@ -1593,7 +2169,9 @@ def command_profiles(args: argparse.Namespace) -> int:
             "docs_url": profile.get("docs_url"),
             "install_hint": profile.get("install_hint"),
             "executable": profile["argv"][0],
-            "executable_candidates": profile.get("executable_candidates", [profile["argv"][0]]),
+            "executable_candidates": profile.get(
+                "executable_candidates", [profile["argv"][0]]
+            ),
             "prompt_transport": profile["prompt_transport"],
             "supports_model": "model_args" in profile,
             "supports_cli_agent": "cli_agent_args" in profile,
@@ -1628,7 +2206,9 @@ def command_doctor(args: argparse.Namespace) -> int:
             "display_name": profile.get("display_name", name),
             "maturity": profile.get("maturity", "stable"),
             "executable": executable,
-            "executable_candidates": profile.get("executable_candidates", [profile["argv"][0]]),
+            "executable_candidates": profile.get(
+                "executable_candidates", [profile["argv"][0]]
+            ),
             "path": found,
             "available": bool(found),
             "install_hint": profile.get("install_hint"),
@@ -1636,7 +2216,11 @@ def command_doctor(args: argparse.Namespace) -> int:
         }
         if found:
             version = subprocess.run(
-                [found, "--version"], capture_output=True, text=True, timeout=10, check=False
+                [found, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
             )
             combined = (version.stdout or version.stderr).strip().splitlines()
             item["version"] = combined[0] if combined else None
@@ -1651,13 +2235,17 @@ def command_doctor(args: argparse.Namespace) -> int:
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
-def compact_model_discovery(output: str, query: str | None) -> list[dict[str, Any]] | None:
+def compact_model_discovery(
+    output: str, query: str | None
+) -> list[dict[str, Any]] | None:
     try:
         value = json.loads(output)
     except json.JSONDecodeError:
         return None
     models = value.get("models") if isinstance(value, dict) else value
-    if not isinstance(models, list) or not all(isinstance(model, dict) for model in models):
+    if not isinstance(models, list) or not all(
+        isinstance(model, dict) for model in models
+    ):
         return None
     choices: list[dict[str, Any]] = []
     for model in models:
@@ -1679,7 +2267,10 @@ def compact_model_discovery(output: str, query: str | None) -> list[dict[str, An
             "default_reasoning_effort": model.get("default_reasoning_level"),
             "reasoning_efforts": efforts,
         }
-        if query and query.casefold() not in json.dumps(item, sort_keys=True).casefold():
+        if (
+            query
+            and query.casefold() not in json.dumps(item, sort_keys=True).casefold()
+        ):
             continue
         choices.append(item)
     return choices
@@ -1702,7 +2293,9 @@ def discovery_result(
     command = replace_placeholders(command_template, {"workspace": str(workspace)})
     executable = shutil.which(command[0])
     if not executable:
-        result.update({"discovery": "unavailable", "error": f"Executable not found: {command[0]}"})
+        result.update(
+            {"discovery": "unavailable", "error": f"Executable not found: {command[0]}"}
+        )
         return result
     try:
         completed = subprocess.run(
@@ -1717,7 +2310,11 @@ def discovery_result(
         result.update({"discovery": "timed_out", "command": command})
         return result
     output = ANSI_RE.sub("", (completed.stdout or completed.stderr).strip())
-    structured_models = compact_model_discovery(output, query) if key == "discover_models_argv" else None
+    structured_models = (
+        compact_model_discovery(output, query)
+        if key == "discover_models_argv"
+        else None
+    )
     if structured_models is not None:
         result.update(
             {
@@ -1729,20 +2326,29 @@ def discovery_result(
         )
         if len(structured_models) > 120 and not full:
             result["compact"] = True
-            result["hint"] = "Use --query <text> for exact matches or --full for every model."
+            result["hint"] = (
+                "Use --query <text> for exact matches or --full for every model."
+            )
         return result
     if query:
         lowered = query.casefold()
-        output = "\n".join(line for line in output.splitlines() if lowered in line.casefold())
+        output = "\n".join(
+            line for line in output.splitlines() if lowered in line.casefold()
+        )
     elif not full and len(output.splitlines()) > 120:
         compact_lines = [
             line
             for line in output.splitlines()
-            if line and (not line.startswith((" ", "\t")) or line.lstrip().startswith("aliases:"))
+            if line
+            and (
+                not line.startswith((" ", "\t")) or line.lstrip().startswith("aliases:")
+            )
         ]
         output = "\n".join(compact_lines[:120])
         result["compact"] = True
-        result["hint"] = "Use --query <text> for exact matches or --full for unabridged output."
+        result["hint"] = (
+            "Use --query <text> for exact matches or --full for unabridged output."
+        )
     result.update(
         {
             "discovery": "succeeded" if completed.returncode == 0 else "failed",
@@ -1774,7 +2380,9 @@ def command_catalog(args: argparse.Namespace) -> int:
             "install_hint": profile.get("install_hint"),
             "available": bool(found),
             "executable": executable,
-            "executable_candidates": profile.get("executable_candidates", [profile["argv"][0]]),
+            "executable_candidates": profile.get(
+                "executable_candidates", [profile["argv"][0]]
+            ),
             "supports": {
                 "model": "model_args" in profile,
                 "cli_agent": "cli_agent_args" in profile,
@@ -1785,14 +2393,30 @@ def command_catalog(args: argparse.Namespace) -> int:
         }
         if not args.no_discovery and item["available"]:
             item["models"] = discovery_result(
-                profile, "discover_models_argv", workspace, args.query, args.timeout_seconds, args.full
+                profile,
+                "discover_models_argv",
+                workspace,
+                args.query,
+                args.timeout_seconds,
+                args.full,
             )
             item["cli_agents"] = discovery_result(
-                profile, "discover_cli_agents_argv", workspace, args.query, args.timeout_seconds, args.full
+                profile,
+                "discover_cli_agents_argv",
+                workspace,
+                args.query,
+                args.timeout_seconds,
+                args.full,
             )
         else:
-            item["models"] = {"configured": profile.get("models", []), "discovery": "skipped"}
-            item["cli_agents"] = {"configured": profile.get("cli_agents", []), "discovery": "skipped"}
+            item["models"] = {
+                "configured": profile.get("models", []),
+                "discovery": "skipped",
+            }
+            item["cli_agents"] = {
+                "configured": profile.get("cli_agents", []),
+                "discovery": "skipped",
+            }
         catalog[name] = item
     print(json.dumps(catalog, indent=2, sort_keys=True))
     return 0
@@ -1830,13 +2454,23 @@ def command_choices(args: argparse.Namespace) -> int:
         "routes": BUILTIN_ROUTES,
         "harnesses": harnesses,
         "selection": {
-            "routes_are_recommendations_only": True,
+            "default_strategy": "cost-first",
+            "automatic_plan_routing": True,
+            "quality_first_authorizes": ["gpt-5.6-sol", "opus"],
+            "quality_first_excludes": ["gpt-6-astra"],
+            "maximum_quality_required_for_automatic_astra": True,
             "executor_allowlist_required": True,
             "automatic_frontier_fallback": False,
-            "custom_fields": ["coordinator_model", "cli", "model", "cli_agent", "reasoning_effort"],
+            "custom_fields": [
+                "coordinator_model",
+                "cli",
+                "model",
+                "cli_agent",
+                "reasoning_effort",
+            ],
             "next_step": (
-                "Use catalog --cli <name>, ask the user for an executor pool, then persist it "
-                "with create-plan or set-executors."
+                "Create a plan with the inferred strategy/risk for automatic installed-model "
+                "routing, or use catalog and an explicit pool when the user names executors."
             ),
         },
     }
@@ -1849,11 +2483,14 @@ def command_choices(args: argparse.Namespace) -> int:
         print(
             f"{name}\t{route['coordinator']['model']} -> "
             f"recommended {executor['recommended_cli']} / {executor['recommended_model']} "
-            "(explicit approval required)"
+            "(plan strategy or explicit pool required)"
         )
     print("\nAVAILABLE HARNESSES")
     for item in harnesses:
-        controls = ",".join(key for key, supported in item["supports"].items() if supported) or "defaults"
+        controls = (
+            ",".join(key for key, supported in item["supports"].items() if supported)
+            or "defaults"
+        )
         availability = "installed" if item["available"] else "unavailable"
         print(f"{item['cli']}\t{availability}\t{item['maturity']}\t{controls}")
     return 0
@@ -1871,7 +2508,9 @@ def active_jobs_for_workspace(workspace: Path) -> list[str]:
             status = get_status(path)
         except RunnerError:
             continue
-        if status.get("workspace") == str(workspace) and status.get("execution_state") in {
+        if status.get("workspace") == str(workspace) and status.get(
+            "execution_state"
+        ) in {
             "starting",
             "running",
             "cancelling",
@@ -1902,7 +2541,11 @@ def command_launch(args: argparse.Namespace) -> int:
         raise RunnerError(f"Task file exceeds {MAX_TASK_BYTES} bytes")
     task_text = task_source.read_text(encoding="utf-8")
     task_stats = task_packet_stats(task_text)
-    if route and task_stats["bytes"] > route["context_budget_bytes"] and not args.allow_large_context:
+    if (
+        route
+        and task_stats["bytes"] > route["context_budget_bytes"]
+        and not args.allow_large_context
+    ):
         raise RunnerError(
             f"Task packet is {task_stats['bytes']} bytes, above the {route['context_budget_bytes']}-byte "
             "quality-first context budget. Create a durable plan and split it into checklist-bound "
@@ -1930,16 +2573,39 @@ def command_launch(args: argparse.Namespace) -> int:
     plan_item: dict[str, Any] | None = None
     if args.plan_id:
         _, plan = read_plan(args.plan_id)
-        matching = [item for item in plan.get("items", []) if item.get("id") == args.checklist_item]
+        matching = [
+            item
+            for item in plan.get("items", [])
+            if item.get("id") == args.checklist_item
+        ]
         if not matching:
-            raise RunnerError(f"Unknown checklist item {args.checklist_item!r} in plan {args.plan_id}")
+            raise RunnerError(
+                f"Unknown checklist item {args.checklist_item!r} in plan {args.plan_id}"
+            )
         if matching[0].get("state") == "done":
             raise RunnerError(f"Checklist item {args.checklist_item} is already done")
         plan_item = matching[0]
-        if args.use_terra_fallback and args.reasoning_effort is None:
-            args.reasoning_effort = (plan.get("executor_policy", {}).get("fallback") or {}).get(
-                "reasoning_effort"
+        attempt_limit = (plan.get("executor_policy") or {}).get("max_attempts_per_item")
+        if (
+            isinstance(attempt_limit, int)
+            and len(plan_item.get("job_ids", [])) >= attempt_limit
+        ):
+            raise RunnerError(
+                f"Checklist item {args.checklist_item} reached its {attempt_limit}-attempt limit; "
+                "ask the user before changing the plan or executor policy"
             )
+        if args.reasoning_effort is None and not args.use_terra_fallback:
+            approved = [
+                entry
+                for entry in (plan.get("executor_policy") or {}).get("allowed", [])
+                if executor_selection_matches(entry, args.cli, args.model)
+            ]
+            if approved:
+                args.reasoning_effort = approved[0].get("reasoning_effort")
+        if args.use_terra_fallback and args.reasoning_effort is None:
+            args.reasoning_effort = (
+                plan.get("executor_policy", {}).get("fallback") or {}
+            ).get("reasoning_effort")
     applied_executor_policy = validate_executor_selection(args, profile, plan)
     fallback_feedback = validate_terra_fallback(
         args, plan, plan_item, workspace, task_stats
@@ -1954,7 +2620,9 @@ def command_launch(args: argparse.Namespace) -> int:
         )
     snapshot = git_snapshot(workspace)
     if snapshot["dirty"] and not args.allow_dirty:
-        raise RunnerError("Workspace has uncommitted changes; use a clean worktree or pass --allow-dirty after recording the baseline")
+        raise RunnerError(
+            "Workspace has uncommitted changes; use a clean worktree or pass --allow-dirty after recording the baseline"
+        )
     selected_job_id = args.job_id or make_job_id(args.cli)
     path = job_dir(selected_job_id, must_exist=False)
     if path.exists():
@@ -1986,7 +2654,10 @@ def command_launch(args: argparse.Namespace) -> int:
         args.reasoning_effort,
         channel_path.parent,
     )
-    redacted_command = ["<prompt_text>" if token == task_copy.read_text(encoding="utf-8") else token for token in command]
+    redacted_command = [
+        "<prompt_text>" if token == task_copy.read_text(encoding="utf-8") else token
+        for token in command
+    ]
     meta = {
         "job_id": selected_job_id,
         "agent": args.cli,
@@ -2009,11 +2680,15 @@ def command_launch(args: argparse.Namespace) -> int:
         "max_turns": args.max_turns,
         "max_cost_usd": args.max_cost_usd,
         "executor_policy": applied_executor_policy,
-        "terra_fallback_feedback_id": fallback_feedback.get("id") if fallback_feedback else None,
+        "terra_fallback_feedback_id": (
+            fallback_feedback.get("id") if fallback_feedback else None
+        ),
         "task_sha256": task_sha256,
         "task_stats": task_stats,
         "context_budget_bytes": route.get("context_budget_bytes") if route else None,
-        "review_required": route.get("review", {}).get("required", True) if route else True,
+        "review_required": (
+            route.get("review", {}).get("required", True) if route else True
+        ),
         "plan_id": args.plan_id,
         "checklist_item": args.checklist_item,
         "scope": {
@@ -2045,7 +2720,13 @@ def command_launch(args: argparse.Namespace) -> int:
         bind_plan_item(args.plan_id, args.checklist_item, selected_job_id)
     runner_log = (path / "runner.log").open("ab", buffering=0)
     worker = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "_worker", "--job-dir", str(path)],
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "_worker",
+            "--job-dir",
+            str(path),
+        ],
         stdin=subprocess.DEVNULL,
         stdout=runner_log,
         stderr=runner_log,
@@ -2114,7 +2795,9 @@ def command_worker(args: argparse.Namespace) -> int:
             meta.get("reasoning_effort"),
             channel_dir(path),
         )
-        with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+        with stdout_path.open("wb") as stdout_handle, stderr_path.open(
+            "wb"
+        ) as stderr_handle:
             os.chmod(stdout_path, 0o600)
             os.chmod(stderr_path, 0o600)
             stdin_path: Path | None = None
@@ -2126,7 +2809,9 @@ def command_worker(args: argparse.Namespace) -> int:
                     json.dumps(
                         {
                             "event": "user",
-                            "message": {"content": prompt_file.read_text(encoding="utf-8")},
+                            "message": {
+                                "content": prompt_file.read_text(encoding="utf-8")
+                            },
                         }
                     )
                     + "\n",
@@ -2146,14 +2831,24 @@ def command_worker(args: argparse.Namespace) -> int:
                     start_new_session=True,
                     close_fds=True,
                 )
-                meta.update({"state": "running", "started_at": started_at, "child_pid": child.pid})
+                meta.update(
+                    {
+                        "state": "running",
+                        "started_at": started_at,
+                        "child_pid": child.pid,
+                    }
+                )
                 write_json(meta_path, meta)
                 add_event(path, "agent_started", child_pid=child.pid)
                 deadline = time.monotonic() + meta["timeout_seconds"]
                 while child.poll() is None and time.monotonic() < deadline:
                     write_json(
                         path / "heartbeat.json",
-                        {"at": utc_now(), "worker_pid": os.getpid(), "child_pid": child.pid},
+                        {
+                            "at": utc_now(),
+                            "worker_pid": os.getpid(),
+                            "child_pid": child.pid,
+                        },
                     )
                     violated_scope = scope_violations(
                         workspace, meta.get("git_baseline", {}), meta.get("scope", {})
@@ -2171,7 +2866,9 @@ def command_worker(args: argparse.Namespace) -> int:
                         exit_code = child.wait()
                 elif child.poll() is None:
                     timed_out = True
-                    add_event(path, "timeout_reached", timeout_seconds=meta["timeout_seconds"])
+                    add_event(
+                        path, "timeout_reached", timeout_seconds=meta["timeout_seconds"]
+                    )
                     terminate_process_group(child.pid)
                     try:
                         exit_code = child.wait(timeout=5)
@@ -2193,7 +2890,11 @@ def command_worker(args: argparse.Namespace) -> int:
             state = "succeeded" if exit_code == 0 else "failed"
     except Exception as exc:  # Worker must leave durable failure evidence.
         with stderr_path.open("ab") as stderr_handle:
-            stderr_handle.write(f"runner error: {type(exc).__name__}: {exc}\n".encode("utf-8", errors="replace"))
+            stderr_handle.write(
+                f"runner error: {type(exc).__name__}: {exc}\n".encode(
+                    "utf-8", errors="replace"
+                )
+            )
         os.chmod(stderr_path, 0o600)
     finished_at = utc_now()
     reported_usage = usage_summary(stdout_path)
@@ -2213,7 +2914,9 @@ def command_worker(args: argparse.Namespace) -> int:
     add_event(path, "agent_finished", state=state, exit_code=exit_code)
     if meta.get("notify"):
         suffix = "; review required" if state == "succeeded" else ""
-        notify_user("Agent Orchestrator", f"Job {meta['job_id']} finished: {state}{suffix}")
+        notify_user(
+            "Agent Orchestrator", f"Job {meta['job_id']} finished: {state}{suffix}"
+        )
     return 0 if state == "succeeded" else 1
 
 
@@ -2262,7 +2965,9 @@ def command_logs(args: argparse.Namespace) -> int:
 
 def command_event(args: argparse.Namespace) -> int:
     path = job_dir(args.job_id)
-    event = add_event(channel_dir(path), "worker_progress", phase=args.phase, message=args.message)
+    event = add_event(
+        channel_dir(path), "worker_progress", phase=args.phase, message=args.message
+    )
     print(json.dumps(event, sort_keys=True))
     return 0
 
@@ -2296,7 +3001,9 @@ def command_ask(args: argparse.Namespace) -> int:
         "created_at": utc_now(),
     }
     write_json(question_path, question)
-    add_event(channel_dir(path), "question_asked", question_id=question_id, question=value)
+    add_event(
+        channel_dir(path), "question_asked", question_id=question_id, question=value
+    )
     meta = read_json(path / "meta.json")
     if meta.get("notify"):
         notify_user("Agent Orchestrator", f"Job {args.job_id} needs input")
@@ -2307,7 +3014,9 @@ def command_ask(args: argparse.Namespace) -> int:
             print(current["answer"])
             return 0
         if current.get("state") == "cancelled":
-            print("Question was cancelled before an answer was provided.", file=sys.stderr)
+            print(
+                "Question was cancelled before an answer was provided.", file=sys.stderr
+            )
             return 2
         time.sleep(min(1, max(0.1, deadline - time.monotonic())))
     with record_lock(question_path):
@@ -2325,8 +3034,11 @@ def command_ask(args: argparse.Namespace) -> int:
 
 def command_questions(args: argparse.Namespace) -> int:
     path = job_dir(args.job_id)
-    questions = [question for question in read_questions(path)
-                 if args.all or question.get("state") == "pending"]
+    questions = [
+        question
+        for question in read_questions(path)
+        if args.all or question.get("state") == "pending"
+    ]
     if args.json:
         print(json.dumps(questions, indent=2, sort_keys=True))
     else:
@@ -2351,7 +3063,10 @@ def answer_text(args: argparse.Namespace) -> str:
 
 
 def command_answer(args: argparse.Namespace) -> int:
-    print_value(answer_worker_question(args.job_id, args.question_id, answer_text(args)), args.json)
+    print_value(
+        answer_worker_question(args.job_id, args.question_id, answer_text(args)),
+        args.json,
+    )
     return 0
 
 
@@ -2413,7 +3128,9 @@ def command_record_review(args: argparse.Namespace) -> int:
         raise RunnerError("This job is already accepted; review evidence is immutable")
     notes = review_notes(args)
     if args.verdict == "accepted" and not args.test:
-        raise RunnerError("An accepted review requires at least one independently run --test result")
+        raise RunnerError(
+            "An accepted review requires at least one independently run --test result"
+        )
     review = {
         "review_id": f"review-{time.time_ns()}-{secrets.token_hex(3)}",
         "job_id": args.job_id,
@@ -2445,15 +3162,27 @@ def command_observe(args: argparse.Namespace) -> int:
     created_at = status.get("created_at")
     try:
         created = dt.datetime.fromisoformat(created_at) if created_at else None
-        elapsed = (dt.datetime.now(dt.timezone.utc) - created).total_seconds() if created else None
+        elapsed = (
+            (dt.datetime.now(dt.timezone.utc) - created).total_seconds()
+            if created
+            else None
+        )
     except ValueError:
         elapsed = None
     observation = {
         **status,
         "elapsed_seconds": round(elapsed, 3) if elapsed is not None else None,
         "logs": {
-            "stdout_bytes": (path / "stdout.log").stat().st_size if (path / "stdout.log").exists() else 0,
-            "stderr_bytes": (path / "stderr.log").stat().st_size if (path / "stderr.log").exists() else 0,
+            "stdout_bytes": (
+                (path / "stdout.log").stat().st_size
+                if (path / "stdout.log").exists()
+                else 0
+            ),
+            "stderr_bytes": (
+                (path / "stderr.log").stat().st_size
+                if (path / "stderr.log").exists()
+                else 0
+            ),
             "stdout_tail": tail_lines(path / "stdout.log", args.tail),
             "stderr_tail": tail_lines(path / "stderr.log", args.tail),
         },
@@ -2472,7 +3201,10 @@ def command_watch(args: argparse.Namespace) -> int:
         while True:
             status = get_status(path)
             if status["state"] != previous_state:
-                print(f"[{utc_now()}] state={status['state']} attention_required={status['attention_required']}", flush=True)
+                print(
+                    f"[{utc_now()}] state={status['state']} attention_required={status['attention_required']}",
+                    flush=True,
+                )
                 previous_state = status["state"]
             for stream in ("stdout", "stderr"):
                 log_path = path / f"{stream}.log"
@@ -2483,10 +3215,17 @@ def command_watch(args: argparse.Namespace) -> int:
                     data = handle.read()
                     offsets[stream] = handle.tell()
                 if data:
-                    print(f"[{stream}] {data.decode('utf-8', errors='replace')}", end="", flush=True)
+                    print(
+                        f"[{stream}] {data.decode('utf-8', errors='replace')}",
+                        end="",
+                        flush=True,
+                    )
             if status["state"] == "needs_input":
                 for question in status["pending_questions"]:
-                    print(f"[question {question['id']}] {question['question']}", flush=True)
+                    print(
+                        f"[question {question['id']}] {question['question']}",
+                        flush=True,
+                    )
                 return 3
             if status["state"] not in {"starting", "running", "cancelling"}:
                 return 0 if status["state"] == "succeeded" else 1
@@ -2560,7 +3299,14 @@ def command_list(args: argparse.Namespace) -> int:
             print(
                 "\t".join(
                     str(item.get(key) or "")
-                    for key in ("job_id", "cli", "model", "cli_agent", "state", "workspace")
+                    for key in (
+                        "job_id",
+                        "cli",
+                        "model",
+                        "cli_agent",
+                        "state",
+                        "workspace",
+                    )
                 )
             )
     return 0
@@ -2573,7 +3319,11 @@ def elapsed_seconds(status: dict[str, Any]) -> float | None:
     try:
         start = dt.datetime.fromisoformat(started_at)
         end_value = status.get("finished_at")
-        end = dt.datetime.fromisoformat(end_value) if end_value else dt.datetime.now(dt.timezone.utc)
+        end = (
+            dt.datetime.fromisoformat(end_value)
+            if end_value
+            else dt.datetime.now(dt.timezone.utc)
+        )
         return max(0.0, (end - start).total_seconds())
     except (TypeError, ValueError):
         return None
@@ -2593,7 +3343,9 @@ def dashboard_rows(group: str | None, limit: int) -> list[dict[str, Any]]:
                 continue
             current = git_snapshot(Path(status["workspace"]))
             baseline = status.get("git_baseline", {})
-            changed = status_paths(current.get("status", [])) - status_paths(baseline.get("status", []))
+            changed = status_paths(current.get("status", [])) - status_paths(
+                baseline.get("status", [])
+            )
             last_event = status.get("last_event") or {}
             rows.append(
                 {
@@ -2632,12 +3384,29 @@ def shortened(value: Any, width: int) -> str:
 
 
 def print_dashboard(rows: list[dict[str, Any]]) -> None:
-    headings = ("JOB", "GROUP", "ROLE", "CLI / MODEL / EFFORT", "EXECUTION", "REVIEW", "PHASE", "FILES", "TIME")
+    headings = (
+        "JOB",
+        "GROUP",
+        "ROLE",
+        "CLI / MODEL / EFFORT",
+        "EXECUTION",
+        "REVIEW",
+        "PHASE",
+        "FILES",
+        "TIME",
+    )
     widths = (25, 12, 16, 34, 13, 15, 14, 5, 8)
-    print("  ".join(shortened(value, width).ljust(width) for value, width in zip(headings, widths)))
+    print(
+        "  ".join(
+            shortened(value, width).ljust(width)
+            for value, width in zip(headings, widths)
+        )
+    )
     for row in rows:
         selection = " / ".join(
-            str(value) for value in (row["cli"], row["model"], row["reasoning_effort"]) if value
+            str(value)
+            for value in (row["cli"], row["model"], row["reasoning_effort"])
+            if value
         )
         elapsed = row["elapsed_seconds"]
         elapsed_text = f"{int(elapsed)}s" if elapsed is not None else "-"
@@ -2652,7 +3421,12 @@ def print_dashboard(rows: list[dict[str, Any]]) -> None:
             row["changed_files"],
             elapsed_text,
         )
-        print("  ".join(shortened(value, width).ljust(width) for value, width in zip(values, widths)))
+        print(
+            "  ".join(
+                shortened(value, width).ljust(width)
+                for value, width in zip(values, widths)
+            )
+        )
 
 
 def command_dashboard(args: argparse.Namespace) -> int:
@@ -2674,6 +3448,7 @@ def command_dashboard(args: argparse.Namespace) -> int:
 
 def command_dashboard_web(args: argparse.Namespace) -> int:
     from dashboard_server import serve
+
     return serve(port=args.port, open_browser=not args.no_open)
 
 
@@ -2734,14 +3509,20 @@ def build_parser() -> argparse.ArgumentParser:
     profiles.add_argument("--config")
     profiles.set_defaults(func=command_profiles)
 
-    routes = subparsers.add_parser("routes", help="List built-in coordinator/executor routing policies")
+    routes = subparsers.add_parser(
+        "routes", help="List built-in coordinator/executor routing policies"
+    )
     routes.set_defaults(func=command_routes)
 
-    validate_task = subparsers.add_parser("validate-task", help="Validate a detailed worker task contract")
+    validate_task = subparsers.add_parser(
+        "validate-task", help="Validate a detailed worker task contract"
+    )
     validate_task.add_argument("--task-file", required=True)
     validate_task.set_defaults(func=command_validate_task)
 
-    catalog = subparsers.add_parser("catalog", help="Discover installed CLIs, models, and internal agents")
+    catalog = subparsers.add_parser(
+        "catalog", help="Discover installed CLIs, models, and internal agents"
+    )
     catalog.add_argument("--cli", default="all")
     catalog.add_argument("--workspace", default=os.getcwd())
     catalog.add_argument("--query")
@@ -2752,7 +3533,9 @@ def build_parser() -> argparse.ArgumentParser:
     catalog.add_argument("--json", action="store_true")
     catalog.set_defaults(func=command_catalog)
 
-    choices = subparsers.add_parser("choices", help="Show routing flows and installed CLI harnesses")
+    choices = subparsers.add_parser(
+        "choices", help="Show routing flows and installed CLI harnesses"
+    )
     choices.add_argument("--include-unavailable", action="store_true")
     choices.add_argument("--config")
     choices.add_argument("--json", action="store_true")
@@ -2763,11 +3546,24 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config")
     doctor.set_defaults(func=command_doctor)
 
-    create_plan = subparsers.add_parser("create-plan", help="Create a durable plan and checklist ledger")
+    create_plan = subparsers.add_parser(
+        "create-plan", help="Create a durable plan and checklist ledger"
+    )
     create_plan.add_argument("--plan-file", required=True)
     create_plan.add_argument("--workspace", default=os.getcwd())
     create_plan.add_argument("--title", required=True)
     create_plan.add_argument("--plan-id")
+    create_plan.add_argument(
+        "--strategy",
+        choices=STRATEGIES,
+        default="cost-first",
+        help=(
+            "Automatic routing intent when no executor pool is supplied. quality-first may use "
+            "Sol/Opus; only maximum-quality may automatically use Astra."
+        ),
+    )
+    create_plan.add_argument("--risk", choices=RISKS, default="medium")
+    create_plan.add_argument("--config")
     create_plan.add_argument(
         "--executor",
         action="append",
@@ -2794,25 +3590,48 @@ def build_parser() -> argparse.ArgumentParser:
     create_plan.add_argument("--json", action="store_true")
     create_plan.set_defaults(func=command_create_plan)
 
-    plan_status = subparsers.add_parser("plan-status", help="Show durable plan decisions and checklist state")
+    plan_status = subparsers.add_parser(
+        "plan-status", help="Show durable plan decisions and checklist state"
+    )
     plan_status.add_argument("plan_id")
     plan_status.add_argument("--json", action="store_true")
     plan_status.set_defaults(func=command_plan_status)
+
+    checkpoint = subparsers.add_parser(
+        "plan-checkpoint",
+        help="Return compact durable state for a coordinator continuation",
+    )
+    checkpoint.add_argument("plan_id")
+    checkpoint.add_argument("--json", action="store_true")
+    checkpoint.set_defaults(func=command_plan_checkpoint)
+
+    metrics = subparsers.add_parser(
+        "metrics", help="Aggregate recent executor outcomes and provider-reported usage"
+    )
+    metrics.add_argument("--since-hours", type=float, default=24)
+    metrics.add_argument("--workspace")
+    metrics.add_argument("--json", action="store_true")
+    metrics.set_defaults(func=command_metrics)
 
     set_executors = subparsers.add_parser(
         "set-executors", help="Replace a plan's user-approved executor allowlist"
     )
     set_executors.add_argument("plan_id")
-    set_executors.add_argument("--executor", action="append", default=[], metavar="CLI=MODEL")
+    set_executors.add_argument(
+        "--executor", action="append", default=[], metavar="CLI=MODEL"
+    )
     set_executors.add_argument(
         "--expensive-executor", action="append", default=[], metavar="CLI=MODEL"
     )
-    set_executors.add_argument("--terra-fallback-after-seconds", type=int, metavar="SECONDS")
+    set_executors.add_argument(
+        "--terra-fallback-after-seconds", type=int, metavar="SECONDS"
+    )
     set_executors.add_argument("--json", action="store_true")
     set_executors.set_defaults(func=command_set_executors)
 
     executor_options = subparsers.add_parser(
-        "executor-options", help="Show attempted and untried executors for one plan item"
+        "executor-options",
+        help="Show attempted and untried executors for one plan item",
     )
     executor_options.add_argument("plan_id")
     executor_options.add_argument("--checklist-item", required=True)
@@ -2923,9 +3742,13 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("--json", action="store_true")
     answer.set_defaults(func=command_answer)
 
-    review = subparsers.add_parser("record-review", help="Record an independent review verdict and evidence")
+    review = subparsers.add_parser(
+        "record-review", help="Record an independent review verdict and evidence"
+    )
     review.add_argument("job_id")
-    review.add_argument("--verdict", choices=("accepted", "repair_required", "rejected"), required=True)
+    review.add_argument(
+        "--verdict", choices=("accepted", "repair_required", "rejected"), required=True
+    )
     review.add_argument("--reviewer", required=True)
     review.add_argument("--test", action="append", default=[])
     review.add_argument("--notes")
@@ -2933,14 +3756,18 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=command_record_review)
 
-    observe = subparsers.add_parser("observe", help="Capture live process, log, event, and diff state")
+    observe = subparsers.add_parser(
+        "observe", help="Capture live process, log, event, and diff state"
+    )
     observe.add_argument("job_id")
     observe.add_argument("--tail", type=int, default=40)
     observe.add_argument("--event-limit", type=int, default=20)
     observe.add_argument("--json", action="store_true")
     observe.set_defaults(func=command_observe)
 
-    watch = subparsers.add_parser("watch", help="Stream job state and logs until attention or completion")
+    watch = subparsers.add_parser(
+        "watch", help="Stream job state and logs until attention or completion"
+    )
     watch.add_argument("job_id")
     watch.add_argument("--interval", type=float, default=2)
     watch.set_defaults(func=command_watch)
@@ -2955,7 +3782,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--json", action="store_true")
     list_parser.set_defaults(func=command_list)
 
-    dashboard = subparsers.add_parser("dashboard", help="Show all worker roles, selections, and live states")
+    dashboard = subparsers.add_parser(
+        "dashboard", help="Show all worker roles, selections, and live states"
+    )
     dashboard.add_argument("--group")
     dashboard.add_argument("--limit", type=int, default=20)
     dashboard.add_argument("--watch", action="store_true")
@@ -2963,20 +3792,25 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--json", action="store_true")
     dashboard.set_defaults(func=command_dashboard)
 
-    web = subparsers.add_parser("dashboard-web", help="Open the private all-project web dashboard")
+    web = subparsers.add_parser(
+        "dashboard-web", help="Open the private all-project web dashboard"
+    )
     web.add_argument("--port", type=int, default=0)
     web.add_argument("--no-open", action="store_true")
     web.set_defaults(func=command_dashboard_web)
 
     ensure_web = subparsers.add_parser(
-        "ensure-dashboard", help="Start or reuse the private dashboard for an orchestration session"
+        "ensure-dashboard",
+        help="Start or reuse the private dashboard for an orchestration session",
     )
     ensure_web.add_argument("--port", type=int, default=0)
     ensure_web.add_argument("--no-open", action="store_true")
     ensure_web.add_argument("--json", action="store_true")
     ensure_web.set_defaults(func=command_ensure_dashboard)
 
-    request = subparsers.add_parser("request-feedback", help="Request durable project orchestrator feedback")
+    request = subparsers.add_parser(
+        "request-feedback", help="Request durable project orchestrator feedback"
+    )
     request.add_argument("--workspace", default=os.getcwd())
     request.add_argument("--question")
     request.add_argument("--question-file")
@@ -2994,7 +3828,9 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--json", action="store_true")
     feedback.set_defaults(func=command_feedback)
 
-    feedback_answer = subparsers.add_parser("answer-feedback", help="Answer pending orchestrator feedback")
+    feedback_answer = subparsers.add_parser(
+        "answer-feedback", help="Answer pending orchestrator feedback"
+    )
     feedback_answer.add_argument("feedback_id")
     feedback_answer.add_argument("--text")
     feedback_answer.add_argument("--file")
@@ -3028,11 +3864,18 @@ def validate_cli_args(args: argparse.Namespace) -> None:
         raise RunnerError("event-limit must be greater than zero")
     if getattr(args, "limit", 1) <= 0:
         raise RunnerError("limit must be greater than zero")
-    if getattr(args, "max_changed_files", None) is not None and args.max_changed_files <= 0:
+    if (
+        getattr(args, "max_changed_files", None) is not None
+        and args.max_changed_files <= 0
+    ):
         raise RunnerError("max-changed-files must be greater than zero")
+    if getattr(args, "since_hours", 1) <= 0:
+        raise RunnerError("since-hours must be greater than zero")
     for field in ("group", "role", "title", "reviewer"):
         value = getattr(args, field, None)
-        if value and (len(value) > 80 or any(ord(character) < 32 for character in value)):
+        if value and (
+            len(value) > 80 or any(ord(character) < 32 for character in value)
+        ):
             raise RunnerError(f"{field} must be at most 80 printable characters")
 
 
