@@ -1,0 +1,10 @@
+{
+  "name": "agent-orchestrator-guard",
+  "version": "1.0.0",
+  "description": "Keeps Cursor CLI execution accountable by denying nested subagents while Agent Orchestrator owns delegation.",
+  "author": {
+    "name": "Augustus Otu"
+  },
+  "license": "MIT",
+  "hooks": "./hooks/hooks.json"
+}

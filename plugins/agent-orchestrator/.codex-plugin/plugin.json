@@ -1,7 +1,7 @@
 {
   "name": "agent-orchestrator",
-  "version": "0.6.0",
-  "description": "Automatically route durable coding plans by cost, quality, and risk, then monitor and review bounded executors.",
+  "version": "0.7.0",
+  "description": "Orchestrate accountable coding teams across Cursor, Devin, Codex, Claude, OpenCode, and other local CLI harnesses.",
   "author": {
     "name": "Augustus Otu",
     "url": "https://github.com/Augani"
@@ -13,13 +13,15 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Orchestrator",
-    "shortDescription": "Route plans by cost, quality, risk, and evidence.",
-    "longDescription": "The current Codex task turns one request into a durable goal and plan, starts an all-project dashboard, resolves installed executors from cost-first, quality-first, or explicit maximum-quality intent, gives each worker a focused contract, resumes from compact checkpoints, asks in chat and the dashboard before escalation, and requires diff and test evidence before acceptance.",
+    "shortDescription": "Run accountable teams across coding CLIs.",
+    "longDescription": "The current Codex task turns one request into a durable goal and plan, starts an all-project dashboard, and creates bounded top-level workers across Cursor, Devin, Codex, Claude, OpenCode, Grok, and other installed harnesses. It resolves models by cost, quality, risk, and evidence; blocks hidden nested subagents where enforceable; asks in chat and the dashboard before escalation; and requires diff and test evidence before acceptance.",
     "developerName": "Augustus Otu",
     "category": "Productivity",
     "websiteURL": "https://github.com/Augani/agent-orchestrator",
     "capabilities": [
       "Long-running jobs",
+      "Cross-harness agent teams",
+      "Cursor CLI",
       "Code delegation",
       "Durable plans",
       "Model routing",

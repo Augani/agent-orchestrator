@@ -41,7 +41,8 @@ guess.
 
 Restate repository rules relevant to this task. Ban commits, pushes, releases, production changes,
 credential changes, destructive cleanup, unrelated refactors, and dependency changes unless each
-was explicitly authorized.
+was explicitly authorized. State that the worker must not spawn native subagents: Agent
+Orchestrator owns all delegation, model selection, retry, and escalation for the job.
 
 # Acceptance criteria
 

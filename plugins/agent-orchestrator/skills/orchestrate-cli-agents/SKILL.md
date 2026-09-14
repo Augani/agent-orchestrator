@@ -1,6 +1,6 @@
 ---
 name: orchestrate-cli-agents
-description: Route durable coding plans between user-selected coordinator and executor models through local CLIs such as DeepSeek Harness, Kimi Code, Codex CLI, Claude Code, Devin, Grok, Gemini, or OpenCode, then monitor and review their diffs. Use for long-running external-agent orchestration; do not use for ordinary in-process subagent delegation.
+description: Route durable coding plans between user-selected coordinator and executor models through local CLIs such as Cursor, DeepSeek Harness, Kimi Code, Codex CLI, Claude Code, Devin, Grok, Gemini, or OpenCode, then monitor and review their diffs. Use for long-running external-agent orchestration; do not use for ordinary in-process subagent delegation.
 ---
 
 # Orchestrate CLI Agents
@@ -22,6 +22,30 @@ python3 <runner> ensure-dashboard --json
 
 This command is idempotent: it reuses the healthy local server recorded for the configured state
 home instead of opening competing dashboard processes.
+
+## Own the cross-harness team
+
+This skill coordinates top-level workers across independent CLI harnesses. It is not a request for
+one selected harness to build an invisible tree of its own subagents. One runner job must represent
+one accountable agent with an exact CLI, model, role, task capsule, workspace, status, usage record,
+question channel, and review verdict.
+
+Choose `--topology auto` by default. Resolve it to `single` for tightly coupled work, small changes,
+or tasks where judgment and ambiguity are the deliverable. Resolve it to `cross-harness` when the
+plan has at least two independent checklist items that can be isolated safely. Prefer two to four
+distinct roles and never exceed the recorded `--max-parallel`. Parallel workers require separate
+worktrees or provably disjoint paths; otherwise encode dependencies and run them in order.
+
+Agent Orchestrator owns spawning, routing, retry, and escalation. Do not ask an executor to create
+nested subagents. Grok is launched with `--no-subagents`; Cursor uses the bundled guard plugin to
+deny `subagentStart`. For other harnesses, state the prohibition in every task contract and treat
+unattributed nested work or model usage as a scope violation. Never let native routing widen the
+approved CLI/model pool.
+
+Use the Fusion pattern selectively: keep plan ownership, ambiguity, final integration, and review
+with the coordinator; delegate bounded exploration, mechanical edits, tests, and well-specified
+implementation. When the hard judgment is the work, use a sufficiently capable explicitly approved
+executor rather than manufacturing a large cheap-agent swarm.
 
 ## Infer the orchestration policy
 
@@ -136,6 +160,8 @@ python3 <runner> create-plan \
   --plan-file <plan.md> \
   --strategy quality-first \
   --risk high \
+  --topology auto \
+  --max-parallel 3 \
   --json
 
 python3 <runner> plan-checkpoint <plan-id> --json
@@ -211,7 +237,7 @@ jobs over `--allow-large-context`; use the override only when decomposition woul
 and the user accepts the context cost.
 
 Built-in CLI profiles are `antigravity`, `deepseek-harness`, `kimi-code`, `codex-cli`,
-`claude-code`, `devin`, `grok`, `gemini`, and `opencode`. `claude` remains as a compatibility alias
+`claude-code`, `cursor`, `devin`, `grok`, `gemini`, and `opencode`. `claude` remains as a compatibility alias
 for `claude-code`.
 Use `profiles` to inspect maturity, installation guidance, prompt transport, and supported selection
 or budget controls. For another CLI, read
@@ -234,6 +260,15 @@ dangerous bypass option. New Codex jobs grant only their per-job `channel/` subt
 `--add-dir {channel_dir}`. Do not grant the state or job root, edit trust configuration, or ask the
 user to trust the private state directory. Authoritative metadata, results, reviews, and lifecycle
 events stay outside that worker-writable subtree. Claude Code uses `acceptEdits`; never add a permission-bypass flag.
+
+Cursor CLI uses `cursor-agent --print --output-format stream-json --sandbox enabled`, an explicit
+`--model`, the selected `--workspace`, and the bundled `cursor-guard` plugin. Discover current model
+IDs with `catalog --cli cursor`; model availability depends on the authenticated Cursor account.
+Never add `--force`, `--yolo`, `--trust`, or `--approve-mcps`, and never use Cursor's own `--worktree`
+because Agent Orchestrator owns workspace selection and cleanup. If Cursor reports `Workspace Trust
+Required`, stop that attempt and ask the user to open `cursor-agent` interactively in the exact
+project workspace once. Do not trust it on the user's behalf and do not relocate the task into the
+orchestrator state directory to evade the gate.
 
 The launch command detaches and returns a job ID. Use `status`, `logs`, or a wait capped below one
 minute so the conversation stays responsive:

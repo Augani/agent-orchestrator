@@ -2,7 +2,8 @@
 
 Agent Orchestrator is a Codex plugin for separating long-lived coordination from bounded code
 execution. You choose which model plans and holds the project thread, which CLI/model executes each
-task, and which model reviews the result.
+task, and which model reviews the result. It can form a small team of independent top-level workers
+across Cursor, Devin, OpenCode, Grok, Codex, Claude, and other installed harnesses.
 
 It is designed for long-running implementation work where you want to choose a less expensive CLI
 or model, give it a precise task contract, see what it is doing, answer clarification questions,
@@ -22,6 +23,30 @@ Sending the entire growing conversation to every executor wastes context. Agent 
 plans, job state, logs, usage, questions, and review evidence in a durable local control plane. The
 coordinator receives compact state changes; every executor gets one bounded context capsule and
 exits after reporting its work.
+
+## This is not just another subagent feature
+
+Cursor, Claude Code, Codex, Devin, and other harnesses can already create subagents inside their own
+runtime. Those native subagents are useful, but they are controlled and metered behind one parent
+harness. Agent Orchestrator owns a different layer: it creates accountable top-level workers across
+different CLIs and subscriptions, gives each an exact role and model, and keeps their questions,
+usage, changes, and review state in one local control plane.
+
+The design is inspired by [Devin Fusion](https://cognition.com/blog/devin-fusion), which pairs a
+frontier lead with a lower-cost sidekick. Agent Orchestrator applies that separation across
+harnesses: a Codex coordinator can assign one bounded item to Cursor, another to Devin, and another
+to OpenCode or Grok. It prefers two to four useful roles over a large swarm, parallelizes only
+independent scopes, and keeps one writer per workspace.
+
+One orchestrator job means one visible agent. Native nested subagents are denied by default where a
+harness exposes a reliable control (`--no-subagents` for Grok and a bundled `subagentStart` deny
+hook for Cursor) and prohibited by the worker contract everywhere else. This prevents hidden model
+switches, surprise parallel token use, and work that cannot be attributed in the dashboard.
+
+This also lets existing personal allowances become an execution portfolio. A user may coordinate
+from Codex while routing suitable tasks through an authenticated Devin, OpenCode, Cursor, Claude,
+or other CLI account. Availability, quotas, and overage billing remain provider-specific; the
+plugin does not turn a subscription into unlimited or interchangeable API credit.
 
 This makes two useful flows possible. A cost-efficient coordinator can preserve the long thread
 while the strongest model handles short implementation bursts, or a strong coordinator can do the
@@ -43,7 +68,9 @@ completion events, the dashboard, and notifications instead of tight polling.
 
 - Independent selection of CLI, model, and a CLI's internal agent/persona when supported.
 - Built-in profiles for Google Antigravity CLI, DeepSeek Harness, Kimi Code, Codex CLI, Claude
-  Code, Devin CLI, Grok CLI, Gemini CLI, and OpenCode.
+  Code, Cursor CLI, Devin CLI, Grok CLI, Gemini CLI, and OpenCode.
+- Durable `auto`, `single`, and `cross-harness` execution topologies with a bounded parallel-team
+  size and Agent Orchestrator ownership of all spawning.
 - Detached jobs with durable status, stdout/stderr logs, heartbeats, progress events, and git diff
   summaries.
 - A job-local question channel that lets a worker pause for a concrete answer without restarting.
@@ -101,6 +128,7 @@ authenticated separately; Agent Orchestrator never stores provider credentials.
 | `grok` | Yes | Yes | Max turns | Uses a prompt file and disables subagents by default. |
 | `gemini` | Yes | No | Provider config | Uses stdin and auto-edit mode. |
 | `opencode` | Provider config | No | Provider config | Uses a process argument, so avoid sensitive task packets. |
+| `cursor` | Yes | Denied | Provider config | Uses sandboxed headless streaming, live model discovery, and a bundled hook that blocks nested subagents. |
 
 Run the catalog before choosing:
 
@@ -112,6 +140,7 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli codex-
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli claude-code
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli kimi-code
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli antigravity
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli cursor
 ```
 
 `choices` shows only installed harnesses by default. Once the user chooses one, `catalog` shows its
@@ -130,6 +159,12 @@ Antigravity uses its official `agy` headless stream protocol, pins `--model`, ac
 as one JSON user event on stdin, so it is not exposed in the process list. It never uses
 `--dangerously-skip-permissions`; configure narrow Antigravity permission rules for the exact write
 paths and validation commands required by the task.
+
+Cursor uses `cursor-agent` in sandboxed headless streaming mode and loads the bundled guard that
+denies nested subagents. Cursor may require a one-time interactive trust decision for each project
+workspace. Open Cursor Agent in that project and make the decision yourself; Agent Orchestrator
+never passes `--trust`, `--force`, `--yolo`, or `--approve-mcps`, and never redirects a worker into
+the private orchestrator state directory merely to avoid the prompt.
 
 ## Choose a model-role flow
 
@@ -175,7 +210,7 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
 ```
 
 The route does not lock execution to Codex CLI. For example, Luna can coordinate while Claude Code,
-Kimi Code, Grok, Devin, Gemini, DeepSeek Harness, OpenCode, or a custom adapter executes. Codex first
+Kimi Code, Grok, Cursor, Devin, Gemini, DeepSeek Harness, OpenCode, or a custom adapter executes. Codex first
 presents what is actually installed, then the selected harness's available model and agent choices.
 
 The coordinator model override is workflow metadata, not a model switch. Select the desired model
@@ -211,11 +246,16 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
   --strategy quality-first \
   --risk high \
   --task-type security \
+  --topology auto \
+  --max-parallel 3 \
   --json
 ```
 
 The plan records every installed CLI/model choice, rank, effort, rationale, and authorization
-source. To rank a discovered cross-harness candidate set before locking it:
+source. `auto` uses one worker for tightly coupled or judgment-heavy work and a cross-harness team
+only when the checklist has independent, safely isolated roles. Use `--topology single` or
+`--topology cross-harness` to make that decision explicit. To rank a discovered cross-harness
+candidate set before locking it:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py recommend-executors \

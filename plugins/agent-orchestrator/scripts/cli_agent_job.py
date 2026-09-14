@@ -53,6 +53,7 @@ PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 ALLOWED_PLACEHOLDERS = {
     "workspace",
     "channel_dir",
+    "plugin_root",
     "prompt_file",
     "prompt_text",
     "model",
@@ -66,6 +67,7 @@ DEFAULT_EXECUTOR_LABEL = "<configured-default>"
 STRATEGIES = ("cost-first", "quality-first", "maximum-quality")
 RISKS = ("low", "medium", "high")
 WORKSPACE_MODES = ("worktree", "project")
+EXECUTION_TOPOLOGIES = ("auto", "single", "cross-harness")
 TASK_TYPES = (
     "general",
     "frontend",
@@ -441,11 +443,45 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "prompt_transport": "arg",
     },
+    "cursor": {
+        "display_name": "Cursor CLI",
+        "description": "Run one sandboxed Cursor worker with nested subagents denied.",
+        "maturity": "stable",
+        "docs_url": "https://prod.cursor.com/docs/cli/overview",
+        "install_hint": "Install and authenticate Cursor CLI, then ensure `cursor-agent` is on PATH.",
+        "argv": [
+            "cursor-agent",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--sandbox",
+            "enabled",
+            "--workspace",
+            "{workspace}",
+            "--plugin-dir",
+            "{plugin_root}/cursor-guard",
+        ],
+        "prompt_transport": "stdin",
+        "model_args": ["--model", "{model}"],
+        "discover_models_argv": ["cursor-agent", "--list-models"],
+    },
 }
 
 
 class RunnerError(Exception):
     pass
+
+
+def bounded_int(value: str, minimum: int, maximum: int, label: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{label} must be an integer") from exc
+    if not minimum <= parsed <= maximum:
+        raise argparse.ArgumentTypeError(
+            f"{label} must be between {minimum} and {maximum}"
+        )
+    return parsed
 
 
 def utc_now() -> str:
@@ -1528,6 +1564,7 @@ def build_command(
     values = {
         "workspace": str(workspace),
         "channel_dir": str(channel_dir or prompt_file.parent / "channel"),
+        "plugin_root": str(Path(__file__).resolve().parents[1]),
         "prompt_file": str(prompt_file),
         "prompt_text": prompt_text,
     }
@@ -1779,6 +1816,12 @@ def command_create_plan(args: argparse.Namespace) -> int:
         "plan_file": str(plan_copy),
         "plan_sha256": hashlib.sha256(plan_copy.read_bytes()).hexdigest(),
         "workspace_mode": preferences["workspace_mode"],
+        "team_policy": {
+            "topology": args.topology,
+            "max_parallel": args.max_parallel,
+            "native_subagents": "deny",
+            "ownership": "agent-orchestrator",
+        },
         "goal": {
             "objective": named_section_body(text, "Goal"),
             "status": "active",
@@ -3888,6 +3931,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create_plan.add_argument("--risk", choices=RISKS, default="medium")
     create_plan.add_argument("--task-type", choices=TASK_TYPES, default="general")
+    create_plan.add_argument(
+        "--topology",
+        choices=EXECUTION_TOPOLOGIES,
+        default="auto",
+        help=(
+            "Execution shape: auto chooses between one worker and a cross-harness team; "
+            "native harness subagents remain denied."
+        ),
+    )
+    create_plan.add_argument(
+        "--max-parallel",
+        type=lambda value: bounded_int(value, 1, 8, "max-parallel"),
+        default=3,
+        help="Maximum independent top-level executor jobs for this plan (1-8).",
+    )
     create_plan.add_argument("--config")
     create_plan.add_argument(
         "--executor",

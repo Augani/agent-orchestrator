@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 - 2026-09-14
+
+- Add a sandboxed Cursor CLI adapter with live model discovery and explicit model selection.
+- Bundle a Cursor hook that denies native subagent spawning so one orchestrator job remains one
+  observable, accountable agent; continue using Grok's native `--no-subagents` control.
+- Add durable `auto`, `single`, and `cross-harness` team topology plus a bounded parallel-worker
+  limit to every plan.
+- Define cross-harness teams as the product boundary: Agent Orchestrator owns delegation, routing,
+  questions, usage, retries, review, and escalation across independent CLI subscriptions.
+- Document the Fusion-inspired lead/sidekick pattern while avoiding hidden model switches, swarm
+  overhead, and unverified subscription or cost claims.
+
 ## 0.6.0 - 2026-09-14
 
 - Group linked worktree jobs under their canonical repository in the dashboard, add a selected

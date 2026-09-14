@@ -1,7 +1,7 @@
 # Adapter configuration
 
-Built-in adapters cover DeepSeek Harness, Kimi Code, Codex CLI, Claude Code, Devin, Grok, Gemini,
-and OpenCode. Add other headless coding CLIs in `~/.config/agent-orchestrator/agents.json`, or pass
+Built-in adapters cover Cursor, DeepSeek Harness, Kimi Code, Codex CLI, Claude Code, Devin, Grok,
+Gemini, and OpenCode. Add other headless coding CLIs in `~/.config/agent-orchestrator/agents.json`, or pass
 another file with `--config`.
 
 ```json
@@ -27,7 +27,9 @@ another file with `--config`.
 Each adapter accepts these fields:
 
 - `argv` (required): an array of executable arguments. It is executed directly, never through a
-  shell. Supported placeholders are `{workspace}`, `{prompt_file}`, and `{prompt_text}`.
+  shell. Supported placeholders are `{workspace}`, `{channel_dir}`, `{plugin_root}`,
+  `{prompt_file}`, `{prompt_text}`, `{model}`, `{cli_agent}`, `{max_turns}`, `{max_cost_usd}`, and
+  `{reasoning_effort}`. Control placeholders belong in their matching optional argument arrays.
 - `executable_candidates` (optional): ordered executable names for compatible distributions. The
   first installed candidate replaces the first `argv` token. Do not use this for behaviorally
   different CLIs.

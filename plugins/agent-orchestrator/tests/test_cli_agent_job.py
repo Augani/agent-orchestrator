@@ -347,6 +347,7 @@ class CliAgentJobTests(unittest.TestCase):
                     "kimi-code",
                     "codex-cli",
                     "claude-code",
+                    "cursor",
                 }.issubset(profiles)
             )
             self.assertEqual(profiles["antigravity"]["prompt_transport"], "jsonl-stdin")
@@ -359,6 +360,8 @@ class CliAgentJobTests(unittest.TestCase):
             self.assertTrue(profiles["codex-cli"]["supports_model"])
             self.assertTrue(profiles["codex-cli"]["supports_reasoning_effort"])
             self.assertTrue(profiles["claude-code"]["supports_cli_agent"])
+            self.assertTrue(profiles["cursor"]["supports_model"])
+            self.assertTrue(profiles["cursor"]["can_discover_models"])
             routes = json.loads(self.run_cli("routes", env=env).stdout)
             self.assertEqual(
                 routes["quality-first"]["executor"]["recommended_model"], "gpt-5.6-sol"
@@ -440,6 +443,86 @@ class CliAgentJobTests(unittest.TestCase):
                 ).stdout
             )
             self.assertEqual(created["workspace_mode"], "project")
+
+    def test_plan_records_cross_harness_team_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            plan_file = root / "plan.md"
+            self.write_plan(plan_file)
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            created = json.loads(
+                self.run_cli(
+                    "create-plan",
+                    "--plan-file",
+                    str(plan_file),
+                    "--workspace",
+                    str(workspace),
+                    "--title",
+                    "Cross-harness team",
+                    "--plan-id",
+                    "cross-harness-plan",
+                    "--executor",
+                    "cursor=glm-5.2-high",
+                    "--topology",
+                    "cross-harness",
+                    "--max-parallel",
+                    "4",
+                    "--json",
+                    env=env,
+                ).stdout
+            )
+            self.assertEqual(
+                created["team_policy"],
+                {
+                    "topology": "cross-harness",
+                    "max_parallel": 4,
+                    "native_subagents": "deny",
+                    "ownership": "agent-orchestrator",
+                },
+            )
+
+    def test_cursor_profile_is_sandboxed_and_denies_native_subagents(self) -> None:
+        profile = runner.load_profiles(None)["cursor"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            task.write_text("bounded task", encoding="utf-8")
+            command, transport = runner.build_command(
+                profile,
+                workspace,
+                task,
+                "glm-5.2-high",
+                None,
+                None,
+                None,
+                None,
+            )
+        self.assertEqual(transport, "stdin")
+        self.assertIn("--sandbox", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "enabled")
+        self.assertIn("--plugin-dir", command)
+        self.assertTrue(command[command.index("--plugin-dir") + 1].endswith("cursor-guard"))
+        self.assertEqual(command[-2:], ["--model", "glm-5.2-high"])
+        self.assertNotIn("--yolo", command)
+        guard = (
+            Path(runner.__file__).resolve().parents[1]
+            / "cursor-guard"
+            / "hooks"
+            / "deny-subagents.py"
+        )
+        decision = subprocess.run(
+            [sys.executable, str(guard)],
+            input='{"subagent_type":"generalPurpose"}',
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(decision.stdout)["permission"], "deny")
 
     def test_antigravity_uses_sandboxed_jsonl_stdin_and_pinned_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

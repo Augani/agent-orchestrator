@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "subagentStart": [
+      {
+        "command": "python3 ./hooks/deny-subagents.py",
+        "matcher": "*",
+        "failClosed": true
+      }
+    ]
+  }
+}

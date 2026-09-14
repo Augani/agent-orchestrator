@@ -99,6 +99,8 @@ python3 <runner> create-plan \
   --strategy cost-first \
   --risk medium \
   --task-type backend \
+  --topology auto \
+  --max-parallel 3 \
   --json
 python3 <runner> plan-status <plan-id> --json
 python3 <runner> plan-checkpoint <plan-id> --json
@@ -107,6 +109,12 @@ python3 <runner> plan-checkpoint <plan-id> --json
 Create one detailed task contract per checklist item. Launch with `--plan-id` and
 `--checklist-item`. Use `--depends-on` only for accepted prerequisites; the runner rejects an
 unreviewed dependency.
+
+The plan records `team_policy`. `auto` becomes a single worker for small, coupled, or
+judgment-heavy work and a cross-harness team for two or more safely isolated roles. In
+`cross-harness`, keep each worker as a top-level runner job and assign exact CLI/model, role, path
+scope, and workspace ownership. Native harness subagents remain denied so usage and responsibility
+cannot disappear beneath one dashboard row.
 
 ## Executor pool and escalation
 
