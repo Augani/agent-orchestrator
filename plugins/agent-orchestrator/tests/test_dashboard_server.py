@@ -108,6 +108,53 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('Local / private', detail['logs']['label'])
         self.assertEqual(detail['review']['tests'], ['unit tests: passed'])
         self.assertNotIn('command', detail)
+        self.assertNotIn(str(self.root), raw.decode())
+        self.assertNotIn('workspace', detail)
+
+    def test_git_main_checkout_and_linked_worktree_share_one_project_and_ownership(self):
+        repository = self.root / 'Dory'
+        linked = self.root / 'Dory-p2-11-inline-cmov-tlb'
+        subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+        subprocess.run(['git', '-C', str(repository), 'config', 'user.name', 'Dashboard Test'], check=True)
+        subprocess.run(['git', '-C', str(repository), 'config', 'user.email', 'dashboard@example.test'], check=True)
+        (repository / 'seed.txt').write_text('seed\n')
+        subprocess.run(['git', '-C', str(repository), 'add', 'seed.txt'], check=True)
+        subprocess.run(['git', '-C', str(repository), 'commit', '-qm', 'seed'], check=True)
+        subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '-q', '-b', 'agent-worktree', str(linked)], check=True)
+        self.job('dory-main', repository)
+        self.job('dory-worker', linked)
+        self.question('dory-worker', 'dory-question')
+        jobs.create_feedback(linked, 'Keep the worktree scope?', feedback_id='dory-feedback', notify=False)
+
+        canonical_pid = dashboard.project_id(str(repository))
+        self.assertEqual(dashboard.project_id(str(linked)), canonical_pid)
+        status, _, raw = self.request('/api/overview')
+        self.assertEqual(status, 200)
+        overview = json.loads(raw)
+        project = next(item for item in overview['projects'] if item['id'] == canonical_pid)
+        self.assertEqual(project['name'], 'Dory')
+        self.assertEqual({row['job_id'] for row in project['jobs']}, {'dory-main', 'dory-worker'})
+        worker = next(row for row in project['jobs'] if row['job_id'] == 'dory-worker')
+        self.assertEqual(worker['pending_questions'][0]['project_id'], canonical_pid)
+        self.assertEqual(worker['pending_questions'][0]['project_name'], 'Dory')
+        self.assertEqual(project['pending_feedback'][0]['project_id'], canonical_pid)
+        self.assertEqual(project['pending_feedback'][0]['project_name'], 'Dory')
+        self.assertNotIn(linked.name, {item['name'] for item in overview['projects']})
+        self.assertNotIn(str(self.root), raw.decode())
+        self.assertNotIn('"workspace"', raw.decode())
+
+        detail_status, _, detail_raw = self.request(f'/api/projects/{canonical_pid}/jobs/dory-worker')
+        self.assertEqual(detail_status, 200)
+        self.assertNotIn(str(self.root), detail_raw.decode())
+        answer = f'/api/projects/{canonical_pid}/jobs/dory-worker/questions/dory-question/answer'
+        self.assertEqual(self.request(answer, 'POST', {'answer': 'Use the canonical project.'})[0], 200)
+        self.assertEqual(jobs.read_questions(jobs.job_dir('dory-worker'))[0]['answer'], 'Use the canonical project.')
+        feedback = f'/api/projects/{canonical_pid}/feedback/dory-feedback/answer'
+        self.assertEqual(self.request(feedback, 'POST', {'answer': 'Keep it narrow.'})[0], 200)
+        canonical_project = json.loads(self.request(f'/api/projects/{canonical_pid}')[2])
+        self.assertEqual(canonical_project['feedback_history'][0]['answer'], 'Keep it narrow.')
+        self.assertEqual(canonical_project['feedback_history'][0]['project_name'], 'Dory')
+        self.assertNotIn(str(self.root), json.dumps(canonical_project))
 
     def test_static_allowlist_and_security_headers(self):
         for path in ('/', '/index.html', '/styles.css', '/app.js'):
@@ -122,6 +169,20 @@ class DashboardTests(unittest.TestCase):
         for path in ('/../scripts/cli_agent_job.py', '/%2e%2e/README.md', '/README.md', '/app.js?file=meta.json', '/state/jobs/alpha/meta.json'):
             self.assertEqual(self.request(path)[0], 404)
         self.assertEqual(self.request('/api/overview', 'OPTIONS')[0], 501)
+
+    def test_static_sources_define_accessible_keyed_agents_navigation(self):
+        web = SCRIPTS.parent / 'web'
+        html = (web / 'index.html').read_text()
+        script = (web / 'app.js').read_text()
+        styles = (web / 'styles.css').read_text()
+        self.assertIn('<aside class="agents-sidebar" aria-label="Agent navigation">', html)
+        self.assertIn('<nav id="agent-navigation" aria-label="Agents in selected project">', html)
+        self.assertIn('id="agent-count"', html)
+        self.assertIn("reconcile($('agent-navigation'), items", script)
+        self.assertIn("button.setAttribute('aria-current'", script)
+        self.assertIn("'Project orchestrator'", script)
+        self.assertIn('.agents-sidebar', styles)
+        self.assertIn('.agent-nav-button[aria-current=true]', styles)
 
     def test_authentication_host_and_origin_boundary(self):
         self.assertEqual(self.request('/api/overview', authenticated=False)[0], 401)
@@ -163,6 +224,8 @@ class DashboardTests(unittest.TestCase):
         project = json.loads(self.request(f'/api/projects/{self.feedback_pid}')[2])
         self.assertEqual(project['pending_feedback'], [])
         self.assertEqual(project['feedback_history'][0]['answer'], 'Keep the scope narrow.')
+        self.assertNotIn('workspace', project)
+        self.assertNotIn(str(self.root), json.dumps(project))
         events = jobs.read_events(jobs.feedback_dir('feedback-a'))
         self.assertEqual([e['type'] for e in events], ['feedback_requested', 'feedback_answered'])
         self.assertEqual(len(jobs.pending_questions(jobs.job_dir('alpha'))), 1)

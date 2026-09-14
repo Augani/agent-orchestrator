@@ -17,6 +17,11 @@
       <nav id="projects" aria-label="Projects"><p class="empty">Loading projects…</p></nav>
       <footer class="rail-footer"><time id="clock"></time><div id="connection"><span class="dot blue"></span>Connecting locally</div><span class="privacy">Private · this computer only</span></footer>
     </aside>
+    <aside class="agents-sidebar" aria-label="Agent navigation">
+      <header class="agents-nav-header"><div><h2>Agents</h2><p>All project agents</p></div><span id="agent-count">0</span></header>
+      <nav id="agent-navigation" aria-label="Agents in selected project"></nav>
+      <p id="agent-navigation-empty" class="empty">Select a project to see its agents.</p>
+    </aside>
     <main id="main">
       <header class="project-header">
         <div><h1 id="project-title" tabindex="-1">Projects</h1><p id="project-subtitle" class="muted">Connecting to your local agents…</p></div>
@@ -24,7 +29,6 @@
       </header>
       <div id="notice" role="status" aria-live="polite"></div>
       <section id="health" class="health" aria-label="Project health"></section>
-      <button type="button" id="orchestrator" class="feedback-link" hidden></button>
       <div class="table-heading"><h2 id="agents-heading">Agents</h2><span id="refresh-status" class="muted">Refreshes every 2 seconds</span></div>
       <div class="table-scroll"><table aria-labelledby="agents-heading"><colgroup><col class="agent-col"><col class="model-col"><col class="task-col"><col class="phase-col"><col class="time-col"><col class="state-col"></colgroup><thead><tr><th scope="col">Agent</th><th scope="col">Model / CLI</th><th scope="col">Current task</th><th scope="col">Phase</th><th scope="col">Elapsed</th><th scope="col">State</th></tr></thead><tbody id="agents"></tbody></table></div>
       <p id="table-empty" class="empty" hidden>No agents match this filter.</p>

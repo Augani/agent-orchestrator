@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import threading
 import time
 import webbrowser
@@ -24,8 +25,61 @@ ACTIVE = {"starting", "running", "needs_input", "cancelling"}
 FAILURE = {"failed", "lost", "scope_violated", "timed_out"}
 
 
+def project_root(workspace: str) -> Path:
+    """Resolve linked Git worktrees to their shared repository checkout."""
+    literal = Path(workspace).resolve()
+    if not literal.is_dir():
+        return literal
+    dot_git = literal / ".git"
+    if dot_git.is_dir():
+        return literal
+    if dot_git.is_file():
+        try:
+            marker = dot_git.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            marker = ""
+        prefix = "gitdir: "
+        if marker.startswith(prefix) and "\x00" not in marker:
+            candidate = Path(marker[len(prefix) :].strip())
+            if not candidate.is_absolute():
+                candidate = literal / candidate
+            try:
+                git_dir = candidate.resolve()
+            except OSError:
+                git_dir = candidate
+            if git_dir.parent.name == "worktrees" and git_dir.parent.parent.name == ".git":
+                return git_dir.parent.parent.parent
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(literal), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return literal
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 1 or not lines[0].strip() or "\x00" in lines[0]:
+        return literal
+    common = Path(lines[0].strip())
+    if not common.is_absolute():
+        common = literal / common
+    try:
+        common = common.resolve()
+    except OSError:
+        return literal
+    return common.parent if common.is_dir() and common != literal else literal
+
+
+def project_identity(workspace: str) -> tuple[str, str]:
+    root = project_root(workspace)
+    pid = "p-" + hashlib.sha256(str(root).encode()).hexdigest()[:24]
+    return pid, root.name or "Workspace"
+
+
 def project_id(workspace: str) -> str:
-    return "p-" + hashlib.sha256(str(Path(workspace).resolve()).encode()).hexdigest()[:24]
+    return project_identity(workspace)[0]
 
 
 def activity_key(item: dict) -> tuple:
@@ -33,10 +87,14 @@ def activity_key(item: dict) -> tuple:
 
 
 def feedback_public(record: dict) -> dict:
-    return {key: record.get(key) for key in (
+    public = {key: record.get(key) for key in (
         "id", "state", "source", "question", "context", "project_name", "plan_id",
         "checklist_item", "created_at", "answered_at", "answer", "fallback_job_id",
         "fallback_started_at")}
+    workspace = record.get("workspace")
+    if isinstance(workspace, str) and workspace:
+        public["project_name"] = project_identity(workspace)[1]
+    return public
 
 
 class DashboardState:
@@ -64,6 +122,7 @@ class DashboardState:
     def job(self, path: Path) -> tuple[dict, dict]:
         status = jobs.get_status(path)
         workspace = status["workspace"]
+        pid, project_name = project_identity(workspace)
         events = jobs.read_events(path, 40)
         progress = [event for event in events if event.get("type") == "worker_progress"]
         latest = events[-1] if events else {}
@@ -72,10 +131,10 @@ class DashboardState:
         if state == "succeeded":
             state = status.get("acceptance_state", "awaiting_review")
         questions = [{**{key: question.get(key) for key in ("id", "state", "question", "created_at")}, "source": "worker", "job_id": path.name,
-                      "project_id": project_id(workspace), "project_name": Path(workspace).name}
+                      "project_id": pid, "project_name": project_name}
                      for question in status.get("pending_questions", [])]
         row = {
-            "job_id": path.name, "project_id": project_id(workspace), "source": "worker",
+            "job_id": path.name, "project_id": pid, "source": "worker",
             "cli": status.get("cli") or status.get("agent"), "model": status.get("model"),
             "cli_agent": status.get("cli_agent"), "role": status.get("role"),
             "coordinator_model": status.get("coordinator_model") or "current-codex-task",
@@ -91,17 +150,19 @@ class DashboardState:
             "active": status.get("execution_state") in ACTIVE,
             "attention_required": bool(questions) or state in FAILURE or state in {"awaiting_review", "repair_required", "rejected"},
         }
-        return row, {"status": status, "events": events, "files": files}
+        return row, {"status": status, "events": events, "files": files,
+                     "project_id": pid, "project_name": project_name}
 
     def overview(self) -> dict:
         projects: dict[str, dict] = {}
         skipped = 0
 
-        def ensure(workspace: str) -> dict:
-            canonical = Path(workspace).resolve()
-            pid = project_id(str(canonical))
-            return projects.setdefault(pid, {"id": pid, "name": canonical.name or "Workspace", "jobs": [],
+        def ensure_identity(pid: str, name: str) -> dict:
+            return projects.setdefault(pid, {"id": pid, "name": name, "jobs": [],
                                             "pending_feedback": [], "plans": [], "updated_at": ""})
+
+        def ensure(workspace: str) -> dict:
+            return ensure_identity(*project_identity(workspace))
 
         for path in sorted(jobs.jobs_dir().glob("*")):
             if not path.is_dir() or not (path / "meta.json").is_file():
@@ -109,7 +170,7 @@ class DashboardState:
             try:
                 jobs.validate_identifier(path.name, "job")
                 row, detail = self.job(path)
-                ensure(detail["status"]["workspace"])["jobs"].append(row)
+                ensure_identity(detail["project_id"], detail["project_name"])["jobs"].append(row)
             except (jobs.RunnerError, OSError, KeyError, ValueError, TypeError):
                 skipped += 1
         for record in jobs.read_feedback():

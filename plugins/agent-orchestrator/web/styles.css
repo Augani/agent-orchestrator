@@ -52,7 +52,7 @@ p {
 .shell {
   min-height:100vh;
   display:grid;
-  grid-template-columns:238px minmax(600px,1fr) 444px}
+  grid-template-columns:238px 210px minmax(560px,1fr) 420px}
 .rail {
   background:#f7f9fb;
   border-right:1px solid var(--line);
@@ -136,6 +136,72 @@ p {
   display:block;
   font-size:11px;
   margin-top:8px}
+.agents-sidebar {
+  min-width:0;
+  min-height:100vh;
+  max-height:100vh;
+  position:sticky;
+  top:0;
+  overflow-y:auto;
+  background:#fbfcfe;
+  border-right:1px solid var(--line);
+  padding:24px 10px 24px}
+.agents-nav-header {
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:8px;
+  padding:0 10px 18px}
+.agents-nav-header h2 {
+  font-size:16px}
+.agents-nav-header p {
+  margin-top:4px;
+  color:var(--muted);
+  font-size:11px}
+.agents-nav-header > span {
+  color:var(--muted);
+  font-size:12px}
+.agent-nav-button {
+  width:100%;
+  min-height:72px;
+  display:grid;
+  grid-template-columns:11px minmax(0,1fr);
+  gap:9px;
+  align-items:start;
+  text-align:left;
+  background:transparent;
+  border:0;
+  border-left:3px solid transparent;
+  border-radius:0 4px 4px 0;
+  padding:11px 9px 10px;
+  margin-bottom:5px}
+.agent-nav-button[aria-current=true] {
+  background:#e8f2ff;
+  border-left-color:var(--blue)}
+.agent-nav-button .dot {
+  width:8px;
+  height:8px;
+  margin:5px 0 0}
+.agent-nav-copy {
+  min-width:0}
+.agent-nav-copy strong,
+.agent-nav-copy small {
+  display:block;
+  overflow-wrap:anywhere}
+.agent-nav-copy strong {
+  font-size:12px;
+  font-weight:650;
+  line-height:1.45}
+.agent-nav-copy small {
+  color:var(--muted);
+  font-size:10px;
+  line-height:1.45;
+  margin-top:3px}
+.agent-nav-status {
+  grid-column:2;
+  color:var(--muted);
+  font-size:10px;
+  line-height:1.3}
 .dot {
   display:inline-block;
   width:10px;
@@ -304,14 +370,6 @@ td.state-cell {
   margin-right:5px}
 .state-cell small {
   font-size:10px}
-.feedback-link {
-  display:block;
-  text-align:left;
-  color:#795000;
-  border-color:#e9c778;
-  background:#fffcf5;
-  margin-top:16px;
-  width:100%}
 .inspector {
   border-left:1px solid var(--line);
   padding:20px 18px 35px;
@@ -552,9 +610,9 @@ dd {
 [hidden] {
   display:none!important}
 
-@media(min-width:1350px) and (max-width:1500px) {
+@media(min-width:1401px) and (max-width:1500px) {
   .shell {
-  grid-template-columns:238px minmax(0,1fr) 444px}
+  grid-template-columns:210px 190px minmax(0,1fr) 390px}
 .project-header {
   flex-wrap:wrap}
 .toolbar {
@@ -566,16 +624,16 @@ dd {
   padding-left:0}
 }
 
-@media(max-width:1200px) {
+@media(max-width:1400px) {
   .shell {
-  grid-template-columns:210px minmax(0,1fr)}
+  grid-template-columns:190px 190px minmax(0,1fr)}
 .inspector {
-  grid-column:2;
+  grid-column:3;
   position:static;
   max-height:none;
   border-top:1px solid var(--line);
   border-left:0}
-.rail {
+.rail,.agents-sidebar {
   grid-row:1/3}
 .table-heading {
   margin-top:24px}
@@ -588,7 +646,16 @@ table {
   min-width:610px}
 }
 
-@media(max-width:700px) {
+@media(max-width:1000px) {
+  .health {
+  grid-template-columns:repeat(2,1fr);
+  row-gap:22px}
+.health .metric:nth-child(3) {
+  border:0;
+  padding-left:0}
+}
+
+@media(max-width:850px) {
   .shell {
   display:block}
 .rail {
@@ -611,16 +678,34 @@ table {
   padding:10px}
 .project-button small {
   display:none}
+.agents-sidebar {
+  min-height:0;
+  max-height:none;
+  position:static;
+  border-right:0;
+  border-bottom:1px solid var(--line);
+  padding:14px 15px}
+.agents-nav-header {
+  align-items:center;
+  padding:0 0 10px}
+#agent-navigation {
+  display:flex;
+  overflow-x:auto;
+  gap:6px;
+  padding:3px}
+.agent-nav-button {
+  flex:0 0 210px;
+  min-height:65px;
+  margin:0;
+  border:1px solid var(--line);
+  border-left-width:3px;
+  border-radius:4px}
+#agent-navigation-empty {
+  padding:12px 0}
 main {
   padding:20px 16px}
 .inspector {
   padding:20px 16px}
-.health {
-  grid-template-columns:repeat(2,1fr);
-  row-gap:22px}
-.health .metric:nth-child(3) {
-  border:0;
-  padding-left:0}
 .table-heading {
   align-items:start}
 .table-heading .muted {

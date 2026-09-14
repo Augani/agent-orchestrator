@@ -72,6 +72,31 @@
     for (const el of existing.values()) el.remove();
   }
   const selectedProject = () => state.projects.find(project => project.id === state.project);
+  function renderAgentNavigation(project) {
+    const items = project ? [{ key: 'orchestrator', orchestrator: true }, ...project.jobs.map(job => ({ ...job, key: job.job_id }))] : [];
+    $('agent-count').textContent = project ? project.jobs.length : 0;
+    $('agent-navigation-empty').hidden = items.length > 0;
+    $('agent-navigation-empty').textContent = project ? 'No agents are available for this project.' : 'Select a project to see its agents.';
+    reconcile($('agent-navigation'), items, item => item.key, () => {
+      const button = node('button', null, 'agent-nav-button'); button.type = 'button';
+      const text = node('span', null, 'agent-nav-copy'); text.append(node('strong'), node('small'));
+      button.append(dot('neutral'), text, node('span', null, 'agent-nav-status'));
+      button.addEventListener('click', () => button.dataset.agentId ? selectAgent(button.dataset.agentId) : selectOrchestrator());
+      return button;
+    }, (button, item) => {
+      const selected = item.orchestrator ? state.agent === null : state.agent === item.job_id;
+      const questions = item.orchestrator ? project.pending_feedback.length : item.pending_questions.length;
+      button.dataset.agentId = item.orchestrator ? '' : item.job_id;
+      button.setAttribute('aria-current', String(selected));
+      button.querySelector('.dot').className = `dot ${item.orchestrator ? questions ? 'amber' : 'neutral' : tone(item)}`;
+      button.querySelector('strong').textContent = item.orchestrator ? 'Project orchestrator' : agentName(item);
+      button.querySelector('small').textContent = item.orchestrator
+        ? questions ? `${questions} project question${questions === 1 ? '' : 's'} waiting` : 'Project feedback and questions'
+        : item.current_work || item.role || 'No progress update yet';
+      button.querySelector('.agent-nav-status').textContent = item.orchestrator ? questions ? 'Needs answer' : 'Ready' : statusLabel(item);
+      button.setAttribute('aria-label', `${button.querySelector('strong').textContent}: ${button.querySelector('.agent-nav-status').textContent}. ${button.querySelector('small').textContent}`);
+    });
+  }
   function renderOverview() {
     const p = selectedProject();
     $('project-count').textContent = state.projects.length;
@@ -89,6 +114,7 @@
       button.querySelector('.count').textContent = item.jobs.length;
       button.title = `${item.name} · ${item.id}`;
     });
+    renderAgentNavigation(p);
     $('project-title').textContent = p ? p.name : 'Your projects';
     $('project-subtitle').textContent = p ? `${p.jobs.length} agents · ${p.plans.length} plans · Updated ${ago(p.updated_at).toLowerCase()}` : 'Jobs and project feedback appear here when created.';
     const health = $('health'); health.replaceChildren();
@@ -101,8 +127,6 @@
       progressMetric.querySelector('strong').after(progress);
       health.append(healthMetric, progressMetric, metric('Latest activity', ago(p.updated_at), 'Local durable state'), metric('Questions', count(p.pending_feedback.length + p.jobs.reduce((sum, j) => sum + j.pending_questions.length, 0)), 'Worker + orchestrator'));
     }
-    $('orchestrator').hidden = !p;
-    if (p) $('orchestrator').textContent = p.pending_feedback.length ? `● ${p.pending_feedback.length} orchestrator question${p.pending_feedback.length === 1 ? '' : 's'} · View and respond` : 'Project orchestrator · Feedback history';
     const rows = p ? p.jobs.filter(j => state.filter === 'all' || state.filter === 'attention' && j.attention_required || state.filter === 'active' && j.active || state.filter === 'complete' && j.state === 'accepted') : [];
     $('agents-heading').textContent = `Agents (${rows.length})`;
     $('table-empty').hidden = rows.length > 0;
@@ -142,6 +166,11 @@
     if (state.agent === id) return;
     $('notice').textContent = '';
     state.agent = id; clearInspector(); renderOverview(); loadDetail();
+  }
+  function selectOrchestrator() {
+    $('notice').textContent = '';
+    if (state.agent !== null) { state.agent = null; clearInspector(); renderOverview(); }
+    setTab('messages'); loadDetail();
   }
   function clearInspector() {
     state.generation++; state.detail = null;
@@ -302,7 +331,6 @@
     $('connection').replaceChildren(dot(state.paused ? 'neutral' : 'green'), document.createTextNode(state.paused ? 'Refresh paused' : 'Connected locally'));
     if (!state.paused) refresh();
   });
-  $('orchestrator').addEventListener('click', () => { state.agent = null; clearInspector(); renderOverview(); setTab('messages'); loadDetail(); });
   $('show-messages').addEventListener('click', () => setTab('messages', true));
   const tabs = [...document.querySelectorAll('[data-tab]')];
   tabs.forEach((button, index) => {
