@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0 - 2026-09-14
+
+- Make executor routing fail closed: built-in routes are recommendations only, model-capable CLIs
+  require an explicit model, and every launch must match a durable pool or one-off approval.
+- Require separate, visible cost approval before Astra, Fable, Opus, or another marked frontier
+  model may execute code; planning and review never imply executor approval.
+- Add durable plan executor pools, replacement history, and `executor-options` attempt/exhaustion
+  reporting so failed or timed-out workers can only move to another approved entry.
+- Add optional pre-approved Terra fallback after pool exhaustion, a linked unanswered user-feedback
+  grace period, and a 32 KiB focused context limit. Astra is never an automatic fallback.
+- Require escalation questions in both the active Codex chat and the dashboard, with user answers
+  taking precedence over timeout behavior.
+- Add `ensure-dashboard` to automatically start or reuse one private all-project dashboard at the
+  beginning of every orchestration session.
+- Add a Google Antigravity CLI profile using the official sandboxed headless JSONL protocol, with
+  explicit model, effort, and internal-agent selection plus live model/agent discovery.
+
 ## 0.4.0 - 2026-09-13
 
 - Add a dependency-free loopback web dashboard for all projects and jobs, with a continuous agent

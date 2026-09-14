@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import importlib.util
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,8 @@ class CliAgentJobTests(unittest.TestCase):
                 "launch",
                 "--cli",
                 "fake",
+                "--approved-executor",
+                "fake",
                 "--workspace",
                 str(workspace),
                 "--task-file",
@@ -159,6 +162,8 @@ class CliAgentJobTests(unittest.TestCase):
             launched = self.run_cli(
                 "launch",
                 "--cli",
+                "asker",
+                "--approved-executor",
                 "asker",
                 "--workspace",
                 str(workspace),
@@ -256,19 +261,33 @@ class CliAgentJobTests(unittest.TestCase):
             result = self.run_cli("profiles", env=env)
             profiles = json.loads(result.stdout)
             self.assertTrue(
-                {"deepseek-harness", "kimi-code", "codex-cli", "claude-code"}.issubset(profiles)
+                {
+                    "antigravity",
+                    "deepseek-harness",
+                    "kimi-code",
+                    "codex-cli",
+                    "claude-code",
+                }.issubset(profiles)
             )
+            self.assertEqual(profiles["antigravity"]["prompt_transport"], "jsonl-stdin")
+            self.assertTrue(profiles["antigravity"]["supports_model"])
+            self.assertTrue(profiles["antigravity"]["supports_cli_agent"])
             self.assertEqual(profiles["deepseek-harness"]["maturity"], "preview")
             self.assertEqual(profiles["kimi-code"]["executable_candidates"], ["kimi", "kimi-cli"])
             self.assertTrue(profiles["codex-cli"]["supports_model"])
             self.assertTrue(profiles["codex-cli"]["supports_reasoning_effort"])
             self.assertTrue(profiles["claude-code"]["supports_cli_agent"])
             routes = json.loads(self.run_cli("routes", env=env).stdout)
-            self.assertEqual(routes["quality-first"]["executor"]["model"], "gpt-6-astra")
+            self.assertEqual(
+                routes["quality-first"]["executor"]["recommended_model"], "gpt-6-astra"
+            )
+            self.assertTrue(routes["quality-first"]["executor"]["requires_explicit_selection"])
             for route in routes.values():
                 self.assertEqual(route["coordinator"]["model"], "current-codex-task")
                 self.assertIn("recommended_task_model", route["coordinator"])
-            self.assertEqual(routes["economy-first"]["executor"]["model"], "gpt-5.6-luna")
+            self.assertEqual(
+                routes["economy-first"]["executor"]["recommended_model"], "gpt-5.6-luna"
+            )
             choices = json.loads(self.run_cli("choices", "--include-unavailable", "--json", env=env).stdout)
             harness_names = {item["cli"] for item in choices["harnesses"]}
             self.assertTrue({"codex-cli", "claude-code", "kimi-code", "grok"}.issubset(harness_names))
@@ -278,6 +297,71 @@ class CliAgentJobTests(unittest.TestCase):
             canonical_choices = json.loads(self.run_cli("choices", "--json", env=env).stdout)
             canonical_names = {item["cli"] for item in canonical_choices["harnesses"]}
             self.assertNotIn("claude", canonical_names)
+
+    def test_antigravity_uses_sandboxed_jsonl_stdin_and_pinned_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            self.write_structured_task(task)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            executable = bin_dir / "agy"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json,sys\n"
+                "payload=json.loads(sys.stdin.readline())\n"
+                "print(json.dumps({'event':'result','result':{'status':'SUCCESS','payload':payload,'argv':sys.argv[1:]}}))\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+            launched = self.run_cli(
+                "launch",
+                "--cli",
+                "antigravity",
+                "--model",
+                "gemini-flash-test",
+                "--cli-agent",
+                "builder",
+                "--reasoning-effort",
+                "low",
+                "--approved-executor",
+                "antigravity=gemini-flash-test",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--no-notify",
+                "--json",
+                env=env,
+            )
+            job_id = json.loads(launched.stdout)["job_id"]
+            waited = self.run_cli(
+                "wait",
+                job_id,
+                "--timeout-seconds",
+                "10",
+                "--poll-seconds",
+                "0.1",
+                "--json",
+                env=env,
+            )
+            self.assertEqual(json.loads(waited.stdout)["state"], "succeeded")
+            output = json.loads(
+                self.run_cli("logs", job_id, "--stream", "stdout", env=env).stdout
+            )
+            self.assertEqual(output["event"], "result")
+            self.assertEqual(output["result"]["payload"]["event"], "user")
+            self.assertIn("# Assigned task", output["result"]["payload"]["message"]["content"])
+            argv = output["result"]["argv"]
+            self.assertIn("--print", argv)
+            self.assertIn("--sandbox", argv)
+            self.assertEqual(argv[argv.index("--model") + 1], "gemini-flash-test")
+            self.assertNotIn("--dangerously-skip-permissions", argv)
 
     def test_structured_model_discovery_is_compacted(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -355,6 +439,8 @@ class CliAgentJobTests(unittest.TestCase):
                 "Quality route test",
                 "--plan-id",
                 "quality-route-test",
+                "--expensive-executor",
+                "codex-cli=gpt-6-astra",
                 "--json",
                 env=env,
             )
@@ -363,6 +449,12 @@ class CliAgentJobTests(unittest.TestCase):
                 "launch",
                 "--route",
                 "quality-first",
+                "--cli",
+                "codex-cli",
+                "--model",
+                "gpt-6-astra",
+                "--reasoning-effort",
+                "high",
                 "--workspace",
                 str(workspace),
                 "--task-file",
@@ -472,6 +564,8 @@ class CliAgentJobTests(unittest.TestCase):
                 "low",
                 "--coordinator-model",
                 "chosen-coordinator",
+                "--approved-executor",
+                "override-worker=chosen-executor",
                 "--workspace",
                 str(workspace),
                 "--task-file",
@@ -509,6 +603,280 @@ class CliAgentJobTests(unittest.TestCase):
                 ["--model", "chosen-executor", "--effort", "low"],
             )
 
+    def test_executor_pool_exhaustion_and_preapproved_terra_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            task = root / "task.md"
+            self.write_structured_task(task)
+            plan_file = root / "plan.md"
+            plan_file.write_text(
+                "# Goal\nShip the bounded feature.\n\n"
+                "# Decisions and assumptions\nUse the approved executor pool.\n\n"
+                "# Constraints and guardrails\nNever fall back to Astra.\n\n"
+                "# Checklist\n- [ ] Implement the feature.\n\n"
+                "# Validation strategy\nRun focused tests.\n\n"
+                "# Completion criteria\nRecord reviewed evidence.\n",
+                encoding="utf-8",
+            )
+            config = root / "agents.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "cheap": {
+                                "argv": [sys.executable, "-c", "raise SystemExit(1)"],
+                                "prompt_transport": "stdin",
+                                "model_args": ["--model", "{model}"],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(root / "state")
+            self.install_fake_codex(root, env)
+            self.run_cli(
+                "create-plan",
+                "--plan-file",
+                str(plan_file),
+                "--workspace",
+                str(workspace),
+                "--title",
+                "Executor pool test",
+                "--plan-id",
+                "pool-test",
+                "--executor",
+                "cheap=cheap-a",
+                "--executor",
+                "cheap=cheap-b",
+                "--terra-fallback-after-seconds",
+                "60",
+                "--json",
+                env=env,
+            )
+
+            unapproved = self.run_cli(
+                "launch",
+                "--cli",
+                "cheap",
+                "--model",
+                "not-approved",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--config",
+                str(config),
+                "--plan-id",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--no-notify",
+                env=env,
+                expected=2,
+            )
+            self.assertIn("is not user-approved", unapproved.stderr)
+
+            attempted_job_ids = []
+            for model in ("cheap-a", "cheap-b"):
+                launched = self.run_cli(
+                    "launch",
+                    "--cli",
+                    "cheap",
+                    "--model",
+                    model,
+                    "--workspace",
+                    str(workspace),
+                    "--task-file",
+                    str(task),
+                    "--config",
+                    str(config),
+                    "--plan-id",
+                    "pool-test",
+                    "--checklist-item",
+                    "item-001",
+                    "--no-notify",
+                    "--json",
+                    env=env,
+                )
+                job_id = json.loads(launched.stdout)["job_id"]
+                attempted_job_ids.append(job_id)
+                self.run_cli(
+                    "wait",
+                    job_id,
+                    "--timeout-seconds",
+                    "10",
+                    "--poll-seconds",
+                    "0.1",
+                    "--json",
+                    env=env,
+                    expected=1,
+                )
+
+            options = self.run_cli(
+                "executor-options",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--json",
+                env=env,
+            )
+            self.assertTrue(json.loads(options.stdout)["exhausted"])
+
+            first_result_path = (
+                root / "state" / "jobs" / attempted_job_ids[0] / "result.json"
+            )
+            first_result = json.loads(first_result_path.read_text(encoding="utf-8"))
+            first_result_path.write_text(
+                json.dumps({**first_result, "state": "succeeded", "exit_code": 0}),
+                encoding="utf-8",
+            )
+            awaiting_review = self.run_cli(
+                "executor-options",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--json",
+                env=env,
+            )
+            awaiting_review_data = json.loads(awaiting_review.stdout)
+            self.assertFalse(awaiting_review_data["exhausted"])
+            self.assertEqual(
+                awaiting_review_data["unresolved_attempts"][0]["acceptance_state"],
+                "awaiting_review",
+            )
+            first_result_path.write_text(json.dumps(first_result), encoding="utf-8")
+
+            question = root / "question.md"
+            question.write_text(
+                "The approved executor pool failed. Do you want to change the pool before the "
+                "pre-approved Terra fallback starts?\n",
+                encoding="utf-8",
+            )
+            answered_feedback = self.run_cli(
+                "request-feedback",
+                "--workspace",
+                str(workspace),
+                "--question-file",
+                str(question),
+                "--plan-id",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--feedback-id",
+                "answered-feedback",
+                "--no-notify",
+                env=env,
+            )
+            self.assertEqual(json.loads(answered_feedback.stdout)["state"], "pending")
+            self.run_cli(
+                "answer-feedback",
+                "answered-feedback",
+                "--text",
+                "Do not use Terra; wait for me.",
+                "--json",
+                env=env,
+            )
+            answered_fallback = self.run_cli(
+                "launch",
+                "--cli",
+                "codex-cli",
+                "--model",
+                "gpt-5.6-terra",
+                "--use-terra-fallback",
+                "--feedback-id",
+                "answered-feedback",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--plan-id",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--no-notify",
+                env=env,
+                expected=2,
+            )
+            self.assertIn("follow the user's answer", answered_fallback.stderr)
+
+            feedback = self.run_cli(
+                "request-feedback",
+                "--workspace",
+                str(workspace),
+                "--question-file",
+                str(question),
+                "--plan-id",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--feedback-id",
+                "pool-feedback",
+                "--no-notify",
+                env=env,
+            )
+            feedback_record = json.loads(feedback.stdout)
+            feedback_record["created_at"] = (
+                runner.dt.datetime.now(runner.dt.timezone.utc) - runner.dt.timedelta(seconds=61)
+            ).isoformat(timespec="seconds")
+            (root / "state" / "feedback" / "pool-feedback" / "feedback.json").write_text(
+                json.dumps(feedback_record), encoding="utf-8"
+            )
+
+            terra = self.run_cli(
+                "launch",
+                "--cli",
+                "codex-cli",
+                "--model",
+                "gpt-5.6-terra",
+                "--use-terra-fallback",
+                "--feedback-id",
+                "pool-feedback",
+                "--workspace",
+                str(workspace),
+                "--task-file",
+                str(task),
+                "--plan-id",
+                "pool-test",
+                "--checklist-item",
+                "item-001",
+                "--no-notify",
+                "--json",
+                env=env,
+            )
+            terra_data = json.loads(terra.stdout)
+            self.assertTrue(terra_data["executor_approval"]["terra_fallback"])
+            self.assertEqual(terra_data["reasoning_effort"], "high")
+            record = json.loads(
+                (root / "state" / "feedback" / "pool-feedback" / "feedback.json").read_text()
+            )
+            self.assertEqual(record["state"], "terra_fallback_started")
+
+    def test_astra_requires_separate_expensive_executor_approval(self) -> None:
+        with self.assertRaises(runner.RunnerError):
+            runner.executor_policy(["codex-cli=gpt-6-astra"], [])
+        policy = runner.executor_policy([], ["codex-cli=gpt-6-astra"])
+        self.assertTrue(policy["allowed"][0]["expensive_user_approved"])
+        self.assertFalse(policy["automatic_frontier_fallback"])
+
+    def test_ensure_dashboard_reuses_one_detached_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env = os.environ.copy()
+            env["AGENT_ORCHESTRATOR_HOME"] = str(Path(temp) / "state")
+            first = self.run_cli("ensure-dashboard", "--no-open", "--json", env=env)
+            first_data = json.loads(first.stdout)
+            try:
+                second = self.run_cli("ensure-dashboard", "--no-open", "--json", env=env)
+                second_data = json.loads(second.stdout)
+                self.assertEqual(first_data["pid"], second_data["pid"])
+                self.assertEqual(first_data["url"], second_data["url"])
+                self.assertTrue(second_data["reused"])
+            finally:
+                os.kill(first_data["pid"], signal.SIGTERM)
+
     def test_quality_route_rejects_oversized_context_capsule(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -523,6 +891,12 @@ class CliAgentJobTests(unittest.TestCase):
                 "launch",
                 "--route",
                 "quality-first",
+                "--cli",
+                "codex-cli",
+                "--model",
+                "gpt-6-astra",
+                "--approved-expensive-executor",
+                "codex-cli=gpt-6-astra",
                 "--workspace",
                 str(workspace),
                 "--task-file",
@@ -568,6 +942,8 @@ class CliAgentJobTests(unittest.TestCase):
             launched = self.run_cli(
                 "launch",
                 "--cli",
+                "fallback",
+                "--approved-executor",
                 "fallback",
                 "--workspace",
                 str(workspace),
@@ -644,6 +1020,8 @@ class CliAgentJobTests(unittest.TestCase):
                 "selectable",
                 "--model",
                 "cheap-model",
+                "--approved-executor",
+                "selectable=cheap-model",
                 "--cli-agent",
                 "builder",
                 "--workspace",
@@ -731,6 +1109,8 @@ class CliAgentJobTests(unittest.TestCase):
             launched = self.run_cli(
                 "launch",
                 "--cli",
+                "drifter",
+                "--approved-executor",
                 "drifter",
                 "--workspace",
                 str(workspace),

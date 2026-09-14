@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import threading
 import time
@@ -34,7 +35,8 @@ def activity_key(item: dict) -> tuple:
 def feedback_public(record: dict) -> dict:
     return {key: record.get(key) for key in (
         "id", "state", "source", "question", "context", "project_name", "plan_id",
-        "checklist_item", "created_at", "answered_at", "answer")}
+        "checklist_item", "created_at", "answered_at", "answer", "fallback_job_id",
+        "fallback_started_at")}
 
 
 class DashboardState:
@@ -320,6 +322,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def serve(port=0, open_browser=True) -> int:
     with DashboardServer(port) as server:
+        runtime_path = jobs.dashboard_runtime_path()
+        runtime = {
+            "pid": os.getpid(),
+            "origin": server.origin,
+            "url": server.url,
+            "started_at": jobs.utc_now(),
+        }
+        jobs.write_json(runtime_path, runtime)
         print(f"Agent Orchestrator dashboard: {server.url}", flush=True)
         if open_browser:
             webbrowser.open(server.url)
@@ -327,4 +337,11 @@ def serve(port=0, open_browser=True) -> int:
             server.serve_forever(poll_interval=0.25)
         except KeyboardInterrupt:
             return 0
+        finally:
+            try:
+                current = jobs.read_json(runtime_path)
+                if current.get("pid") == os.getpid():
+                    runtime_path.unlink(missing_ok=True)
+            except jobs.RunnerError:
+                pass
     return 0

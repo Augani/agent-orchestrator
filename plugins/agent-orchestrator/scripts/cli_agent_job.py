@@ -18,12 +18,15 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
+import webbrowser
 from pathlib import Path
 from typing import Any
 
 
 MAX_TASK_BYTES = 1_000_000
 QUALITY_FIRST_CONTEXT_BYTES = 65_536
+TERRA_FALLBACK_CONTEXT_BYTES = 32_768
 REQUIRED_TASK_SECTIONS = (
     "Objective",
     "Why",
@@ -58,6 +61,8 @@ ALLOWED_PLACEHOLDERS = {
     "max_cost_usd",
     "reasoning_effort",
 }
+EXPENSIVE_EXECUTOR_MARKERS = ("astra", "fable", "opus")
+DEFAULT_EXECUTOR_LABEL = "<configured-default>"
 
 BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
     "quality-first": {
@@ -72,14 +77,17 @@ BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
             "responsibility": "Task decomposition, durable decisions, questions, and progress deltas.",
         },
         "executor": {
-            "cli": "codex-cli",
-            "model": "gpt-6-astra",
-            "reasoning_effort": "high",
+            "requires_explicit_selection": True,
+            "recommended_cli": "codex-cli",
+            "recommended_model": "gpt-6-astra",
+            "recommended_reasoning_effort": "high",
+            "cost_warning": "Astra execution requires separate user-approved expensive-executor consent.",
             "session": "ephemeral",
         },
         "review": {
             "required": True,
-            "high_risk_model": "gpt-6-astra",
+            "recommended_high_risk_model": "gpt-6-astra",
+            "requires_explicit_selection": True,
             "policy": "Independent diff review and rerun tests before acceptance.",
         },
         "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
@@ -96,14 +104,16 @@ BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
             "responsibility": "Architecture, decomposition, questions, progress, and review.",
         },
         "executor": {
-            "cli": "codex-cli",
-            "model": "gpt-5.6-luna",
-            "reasoning_effort": "high",
+            "requires_explicit_selection": True,
+            "recommended_cli": "codex-cli",
+            "recommended_model": "gpt-5.6-luna",
+            "recommended_reasoning_effort": "high",
             "session": "ephemeral",
         },
         "review": {
             "required": True,
-            "high_risk_model": "gpt-6-astra",
+            "recommended_high_risk_model": "gpt-6-astra",
+            "requires_explicit_selection": True,
             "policy": "Coordinator reviews the diff and reruns tests before acceptance.",
         },
         "context_budget_bytes": QUALITY_FIRST_CONTEXT_BYTES,
@@ -111,6 +121,31 @@ BUILTIN_ROUTES: dict[str, dict[str, Any]] = {
 }
 
 BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
+    "antigravity": {
+        "display_name": "Google Antigravity CLI",
+        "description": "Run a pinned Antigravity model and agent in sandboxed headless mode.",
+        "maturity": "stable",
+        "docs_url": "https://antigravity.google/docs/cli/headless/",
+        "install_hint": "Install and authenticate Antigravity CLI, then ensure `agy` is on PATH.",
+        "argv": [
+            "agy",
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--sandbox",
+            "--print-timeout",
+            "120m",
+        ],
+        "executable_candidates": ["agy", "antigravity"],
+        "prompt_transport": "jsonl-stdin",
+        "model_args": ["--model", "{model}"],
+        "cli_agent_args": ["--agent", "{cli_agent}"],
+        "reasoning_effort_args": ["--effort", "{reasoning_effort}"],
+        "discover_models_argv": ["agy", "models"],
+        "discover_cli_agents_argv": ["agy", "agents"],
+    },
     "devin": {
         "display_name": "Devin CLI",
         "description": "Delegate a bounded implementation task to Devin CLI.",
@@ -220,7 +255,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "prompt_transport": "stdin",
         "model_args": ["--model", "{model}"],
-        "models": ["gpt-6-astra", "gpt-5.6-luna"],
+        "models": ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"],
         "discover_models_argv": ["codex", "debug", "models"],
         "reasoning_effort_args": [
             "--config",
@@ -722,8 +757,8 @@ def validate_profile(name: str, raw: Any) -> dict[str, Any]:
         "argv": validate_string_list(raw.get("argv"), f"{name}.argv"),
         "prompt_transport": raw.get("prompt_transport"),
     }
-    if profile["prompt_transport"] not in {"file", "stdin", "arg"}:
-        raise RunnerError(f"{name}.prompt_transport must be file, stdin, or arg")
+    if profile["prompt_transport"] not in {"file", "stdin", "jsonl-stdin", "arg"}:
+        raise RunnerError(f"{name}.prompt_transport must be file, stdin, jsonl-stdin, or arg")
     for key in ("display_name", "description", "docs_url", "install_hint"):
         if key in raw:
             if not isinstance(raw[key], str) or not raw[key].strip():
@@ -802,15 +837,190 @@ def resolve_route(name: str | None) -> dict[str, Any] | None:
 
 def apply_launch_route(args: argparse.Namespace) -> dict[str, Any] | None:
     route = resolve_route(args.route)
-    if route:
-        executor = route["executor"]
-        args.cli = args.cli or executor["cli"]
-        args.model = args.model or executor["model"]
-        args.reasoning_effort = args.reasoning_effort or executor.get("reasoning_effort")
     args.coordinator_model = args.coordinator_model or "current-codex-task"
     if not args.cli:
-        raise RunnerError("Choose --cli or select a --route that supplies one")
+        raise RunnerError(
+            "Choose --cli explicitly. Routes are recommendations and never select an executor."
+        )
     return route
+
+
+def is_expensive_executor_model(model: str | None) -> bool:
+    if not model:
+        return False
+    normalized = model.casefold()
+    return any(marker in normalized for marker in EXPENSIVE_EXECUTOR_MARKERS)
+
+
+def parse_executor_spec(value: str, expensive_approved: bool = False) -> dict[str, Any]:
+    raw = value.strip()
+    if not raw:
+        raise RunnerError("Executor selection cannot be empty")
+    if "=" in raw:
+        cli, model = raw.split("=", 1)
+        cli = cli.strip()
+        model = model.strip()
+        if not model:
+            raise RunnerError(f"Executor {value!r} has an empty model after '='")
+    else:
+        cli, model = raw, None
+    if not AGENT_NAME_RE.fullmatch(cli):
+        raise RunnerError(f"Invalid executor CLI in {value!r}")
+    if model is not None and (len(model) > 256 or any(ord(char) < 32 for char in model)):
+        raise RunnerError(f"Invalid executor model in {value!r}")
+    if is_expensive_executor_model(model) and not expensive_approved:
+        raise RunnerError(
+            f"Executor {cli}={model} is a protected expensive/frontier selection. "
+            f"Use --expensive-executor {cli}={model} only after the user explicitly accepts its cost."
+        )
+    return {
+        "cli": cli,
+        "model": model,
+        "display": f"{cli}={model}" if model is not None else f"{cli}={DEFAULT_EXECUTOR_LABEL}",
+        "expensive_user_approved": bool(expensive_approved),
+    }
+
+
+def executor_policy(
+    executor_values: list[str],
+    expensive_executor_values: list[str],
+    terra_fallback_after_seconds: int | None = None,
+) -> dict[str, Any]:
+    if terra_fallback_after_seconds is not None and not 60 <= terra_fallback_after_seconds <= 86_400:
+        raise RunnerError("Terra fallback grace period must be between 60 and 86400 seconds")
+    entries = [parse_executor_spec(value) for value in executor_values]
+    entries.extend(parse_executor_spec(value, expensive_approved=True) for value in expensive_executor_values)
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for entry in entries:
+        key = (entry["cli"], entry["model"])
+        if key in seen:
+            raise RunnerError(f"Duplicate executor selection: {entry['display']}")
+        seen.add(key)
+        unique.append(entry)
+    if terra_fallback_after_seconds is not None and not unique:
+        raise RunnerError("Terra fallback requires at least one primary executor to exhaust first")
+    fallback = {
+        "enabled": terra_fallback_after_seconds is not None,
+        "cli": "codex-cli",
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "high",
+        "after_seconds": terra_fallback_after_seconds,
+        "requires_pending_feedback": True,
+        "requires_exhausted_pool": True,
+        "max_context_bytes": TERRA_FALLBACK_CONTEXT_BYTES,
+        "user_preapproved": terra_fallback_after_seconds is not None,
+    }
+    return {
+        "mode": "allowlist_only",
+        "allowed": unique,
+        "on_exhausted": (
+            "request_user_then_terra_after_grace"
+            if terra_fallback_after_seconds is not None
+            else "request_user_approval"
+        ),
+        "automatic_frontier_fallback": False,
+        "fallback": fallback,
+        "updated_at": utc_now(),
+    }
+
+
+def executor_selection_matches(entry: dict[str, Any], cli: str, model: str | None) -> bool:
+    return entry.get("cli") == cli and entry.get("model") == model
+
+
+def selected_executor_approval(
+    policy: dict[str, Any], cli: str, model: str | None
+) -> dict[str, Any]:
+    for entry in policy.get("allowed", []):
+        if executor_selection_matches(entry, cli, model):
+            return entry
+    fallback = policy.get("fallback") or {}
+    if fallback.get("enabled") and executor_selection_matches(fallback, cli, model):
+        return {
+            "cli": cli,
+            "model": model,
+            "display": f"{cli}={model or DEFAULT_EXECUTOR_LABEL}",
+            "expensive_user_approved": False,
+            "terra_fallback": True,
+        }
+    raise RunnerError("Resolved executor has no matching approval record")
+
+
+def validate_executor_selection(
+    args: argparse.Namespace,
+    profile: dict[str, Any],
+    plan: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if "model_args" in profile and not args.model:
+        raise RunnerError(
+            f"CLI {args.cli} supports model selection; choose --model explicitly so its configured "
+            "default cannot silently select an expensive executor"
+        )
+    if "model_args" not in profile and args.model:
+        raise RunnerError(f"Selected CLI {args.cli} does not support explicit model selection")
+
+    if plan is not None:
+        if args.approved_executor or args.approved_expensive_executor:
+            raise RunnerError(
+                "A plan's durable executor pool is authoritative. Use set-executors to change it; "
+                "one-off launch flags cannot widen the pool."
+            )
+        policy = plan.get("executor_policy") or {}
+    else:
+        policy = executor_policy(args.approved_executor, args.approved_expensive_executor)
+
+    allowed = policy.get("allowed", [])
+    if not allowed:
+        target = "plan" if plan is not None else "launch"
+        raise RunnerError(
+            f"No user-approved executors exist for this {target}. "
+            "Set a bounded executor pool before launching; automatic fallback is disabled."
+        )
+    matching = [
+        entry for entry in allowed if executor_selection_matches(entry, args.cli, args.model)
+    ]
+    fallback = policy.get("fallback") or {}
+    using_terra_fallback = bool(
+        getattr(args, "use_terra_fallback", False)
+        and fallback.get("enabled")
+        and executor_selection_matches(fallback, args.cli, args.model)
+    )
+    if not matching and not using_terra_fallback:
+        approved = ", ".join(entry.get("display", "unknown") for entry in allowed)
+        raise RunnerError(
+            f"Executor {args.cli}={args.model or DEFAULT_EXECUTOR_LABEL} is not user-approved. "
+            f"Allowed executors: {approved}. Update the pool only after asking the user."
+        )
+    entry = selected_executor_approval(policy, args.cli, args.model)
+    if is_expensive_executor_model(args.model) and not entry.get("expensive_user_approved"):
+        raise RunnerError(
+            f"Executor {args.cli}={args.model} requires explicit expensive-executor approval"
+        )
+    return policy
+
+
+def dashboard_runtime_path() -> Path:
+    return state_home() / "dashboard.json"
+
+
+def live_dashboard_runtime() -> dict[str, Any] | None:
+    path = dashboard_runtime_path()
+    if not path.is_file():
+        return None
+    try:
+        runtime = read_json(path)
+        if not pid_alive(runtime.get("pid")):
+            return None
+        origin = runtime.get("origin")
+        if not isinstance(origin, str) or not origin.startswith("http://127.0.0.1:"):
+            return None
+        with urllib.request.urlopen(origin + "/", timeout=0.5) as response:
+            if response.status != 200:
+                return None
+        return runtime
+    except (RunnerError, OSError, ValueError, urllib.error.URLError):
+        return None
 
 
 def replace_placeholders(tokens: list[str], values: dict[str, str]) -> list[str]:
@@ -1020,6 +1230,9 @@ def command_create_plan(args: argparse.Namespace) -> int:
         "created_at": utc_now(),
         "plan_file": str(plan_copy),
         "plan_sha256": hashlib.sha256(plan_copy.read_bytes()).hexdigest(),
+        "executor_policy": executor_policy(
+            args.executor, args.expensive_executor, args.terra_fallback_after_seconds
+        ),
         "items": items,
     }
     save_plan(path, plan)
@@ -1036,9 +1249,191 @@ def command_plan_status(args: argparse.Namespace) -> int:
         print(f"plan_id: {plan['plan_id']}")
         print(f"title: {plan['title']}")
         print(f"complete: {plan.get('complete', False)}")
+        policy = plan.get("executor_policy", {})
+        approved = policy.get("allowed", [])
+        print("executor_policy: allowlist_only")
+        print("approved_executors: " + (", ".join(item["display"] for item in approved) or "none"))
+        print(f"automatic_frontier_fallback: {policy.get('automatic_frontier_fallback', False)}")
         for item in plan.get("items", []):
             print(f"{item['id']}\t{item['state']}\t{item['title']}")
     return 0
+
+
+def command_set_executors(args: argparse.Namespace) -> int:
+    path, plan = read_plan(args.plan_id)
+    policy = executor_policy(
+        args.executor, args.expensive_executor, args.terra_fallback_after_seconds
+    )
+    if not policy["allowed"]:
+        raise RunnerError("Provide at least one --executor or --expensive-executor")
+    previous = plan.get("executor_policy")
+    if previous:
+        plan.setdefault("executor_policy_history", []).append(previous)
+    plan["executor_policy"] = policy
+    save_plan(path, plan)
+    output = {
+        "plan_id": args.plan_id,
+        "executor_policy": policy,
+        "warning": (
+            "Only this pool may execute plan items. If every entry fails or is unavailable, "
+            "ask the user in chat and the dashboard before replacing the pool or using a "
+            "pre-approved Terra fallback."
+        ),
+    }
+    print(json.dumps(output, indent=2, sort_keys=True) if args.json else ", ".join(
+        entry["display"] for entry in policy["allowed"]
+    ))
+    return 0
+
+
+def executor_options_for_item(plan: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    attempts_by_key: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
+    for job_id in item.get("job_ids", []):
+        try:
+            status = get_status(job_dir(job_id))
+        except RunnerError:
+            continue
+        key = (status.get("cli"), status.get("model"))
+        attempt = {
+            "job_id": job_id,
+            "cli": status.get("cli"),
+            "model": status.get("model"),
+            "execution_state": status.get("execution_state"),
+            "acceptance_state": status.get("acceptance_state"),
+        }
+        attempts.append(attempt)
+        attempts_by_key.setdefault(key, []).append(attempt)
+    policy = plan.get("executor_policy") or {}
+    allowed = policy.get("allowed", [])
+    untried = [
+        entry for entry in allowed if (entry.get("cli"), entry.get("model")) not in attempts_by_key
+    ]
+    terminal_execution_failures = {"failed", "timed_out", "cancelled", "scope_violated", "lost"}
+    terminal_review_failures = {"repair_required", "rejected"}
+
+    def is_terminal_failure(attempt: dict[str, Any]) -> bool:
+        return attempt.get("execution_state") in terminal_execution_failures or (
+            attempt.get("execution_state") == "succeeded"
+            and attempt.get("acceptance_state") in terminal_review_failures
+        )
+
+    unresolved = [attempt for attempt in attempts if not is_terminal_failure(attempt)]
+    exhausted_entries = []
+    for entry in allowed:
+        key = (entry.get("cli"), entry.get("model"))
+        entry_attempts = attempts_by_key.get(key, [])
+        if entry_attempts and all(is_terminal_failure(attempt) for attempt in entry_attempts):
+            exhausted_entries.append(entry)
+    return {
+        "plan_id": plan["plan_id"],
+        "checklist_item": item["id"],
+        "allowed": allowed,
+        "attempts": attempts,
+        "untried": untried,
+        "unresolved_attempts": unresolved,
+        "exhausted_entries": exhausted_entries,
+        "exhausted": bool(allowed) and len(exhausted_entries) == len(allowed),
+        "on_exhausted": policy.get("on_exhausted", "request_user_approval"),
+        "automatic_frontier_fallback": False,
+    }
+
+
+def command_executor_options(args: argparse.Namespace) -> int:
+    _, plan = read_plan(args.plan_id)
+    matching = [item for item in plan.get("items", []) if item.get("id") == args.checklist_item]
+    if not matching:
+        raise RunnerError(f"Unknown checklist item {args.checklist_item!r} in plan {args.plan_id}")
+    output = executor_options_for_item(plan, matching[0])
+    print(json.dumps(output, indent=2, sort_keys=True) if args.json else json.dumps(output, sort_keys=True))
+    return 0
+
+
+def validate_terra_fallback(
+    args: argparse.Namespace,
+    plan: dict[str, Any] | None,
+    item: dict[str, Any] | None,
+    workspace: Path,
+    task_stats: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not args.use_terra_fallback:
+        return None
+    if plan is None or item is None:
+        raise RunnerError("Terra fallback requires a durable plan and checklist item")
+    policy = plan.get("executor_policy") or {}
+    fallback = policy.get("fallback") or {}
+    if not fallback.get("enabled") or not fallback.get("user_preapproved"):
+        raise RunnerError(
+            "Terra fallback was not disclosed and approved when the executor pool was set"
+        )
+    if not executor_selection_matches(fallback, args.cli, args.model):
+        raise RunnerError(
+            f"Terra fallback must use {fallback.get('cli')}={fallback.get('model')}"
+        )
+    options = executor_options_for_item(plan, item)
+    if options["untried"]:
+        remaining = ", ".join(entry["display"] for entry in options["untried"])
+        raise RunnerError(
+            f"Approved executor pool is not exhausted; try these entries before Terra: {remaining}"
+        )
+    if options["unresolved_attempts"]:
+        job_ids = ", ".join(attempt["job_id"] for attempt in options["unresolved_attempts"])
+        raise RunnerError(
+            "Approved executor pool is not exhausted; these jobs are still active, awaiting "
+            f"review, or accepted: {job_ids}"
+        )
+    if not options["exhausted"]:
+        raise RunnerError("Approved executor pool is not exhausted")
+    if not args.feedback_id:
+        raise RunnerError(
+            "Terra fallback requires --feedback-id for the unanswered chat/dashboard escalation"
+        )
+    path = feedback_dir(args.feedback_id)
+    record = read_json(path / "feedback.json")
+    if record.get("state") != "pending":
+        raise RunnerError(
+            f"Feedback {args.feedback_id} is {record.get('state')}; follow the user's answer instead"
+        )
+    if (
+        record.get("plan_id") != plan["plan_id"]
+        or record.get("checklist_item") != item["id"]
+        or Path(record.get("workspace", "")).resolve() != workspace
+    ):
+        raise RunnerError("Fallback feedback does not belong to this plan item and workspace")
+    try:
+        created = dt.datetime.fromisoformat(record["created_at"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RunnerError("Fallback feedback has an invalid creation time") from exc
+    age = (dt.datetime.now(dt.timezone.utc) - created).total_seconds()
+    grace = fallback["after_seconds"]
+    if age < grace:
+        raise RunnerError(
+            f"User feedback grace period has not elapsed; wait {int(grace - age) + 1} more seconds"
+        )
+    if task_stats["bytes"] > fallback["max_context_bytes"]:
+        raise RunnerError(
+            f"Terra fallback packet is {task_stats['bytes']} bytes; split it below "
+            f"{fallback['max_context_bytes']} bytes to keep the fallback narrowly focused"
+        )
+    return record
+
+
+def claim_feedback_for_fallback(feedback_id: str, job_id: str) -> None:
+    path = feedback_dir(feedback_id)
+    record_path = path / "feedback.json"
+    with record_lock(record_path):
+        record = read_json(record_path)
+        if record.get("state") != "pending":
+            raise RunnerError(
+                f"Feedback {feedback_id} is no longer pending; follow the user's answer"
+            )
+        record.update(
+            state="terra_fallback_started",
+            fallback_job_id=job_id,
+            fallback_started_at=utc_now(),
+        )
+        write_json(record_path, record)
+        add_event(path, "terra_fallback_started", feedback_id=feedback_id, job_id=job_id)
 
 
 def bind_plan_item(plan_id: str, item_id: str, job_id: str) -> None:
@@ -1435,9 +1830,14 @@ def command_choices(args: argparse.Namespace) -> int:
         "routes": BUILTIN_ROUTES,
         "harnesses": harnesses,
         "selection": {
-            "route_defaults_are_overridable": True,
+            "routes_are_recommendations_only": True,
+            "executor_allowlist_required": True,
+            "automatic_frontier_fallback": False,
             "custom_fields": ["coordinator_model", "cli", "model", "cli_agent", "reasoning_effort"],
-            "next_step": "Use catalog --cli <name> for live model and internal-agent discovery.",
+            "next_step": (
+                "Use catalog --cli <name>, ask the user for an executor pool, then persist it "
+                "with create-plan or set-executors."
+            ),
         },
     }
     if args.json:
@@ -1445,9 +1845,11 @@ def command_choices(args: argparse.Namespace) -> int:
         return 0
     print("ROUTES")
     for name, route in sorted(BUILTIN_ROUTES.items()):
+        executor = route["executor"]
         print(
             f"{name}\t{route['coordinator']['model']} -> "
-            f"{route['executor']['cli']} / {route['executor']['model']}"
+            f"recommended {executor['recommended_cli']} / {executor['recommended_model']} "
+            "(explicit approval required)"
         )
     print("\nAVAILABLE HARNESSES")
     for item in harnesses:
@@ -1524,6 +1926,8 @@ def command_launch(args: argparse.Namespace) -> int:
         raise RunnerError(f"Executable not found on PATH (tried: {candidates}).{hint}")
     if bool(args.plan_id) != bool(args.checklist_item):
         raise RunnerError("--plan-id and --checklist-item must be supplied together")
+    plan: dict[str, Any] | None = None
+    plan_item: dict[str, Any] | None = None
     if args.plan_id:
         _, plan = read_plan(args.plan_id)
         matching = [item for item in plan.get("items", []) if item.get("id") == args.checklist_item]
@@ -1531,6 +1935,15 @@ def command_launch(args: argparse.Namespace) -> int:
             raise RunnerError(f"Unknown checklist item {args.checklist_item!r} in plan {args.plan_id}")
         if matching[0].get("state") == "done":
             raise RunnerError(f"Checklist item {args.checklist_item} is already done")
+        plan_item = matching[0]
+        if args.use_terra_fallback and args.reasoning_effort is None:
+            args.reasoning_effort = (plan.get("executor_policy", {}).get("fallback") or {}).get(
+                "reasoning_effort"
+            )
+    applied_executor_policy = validate_executor_selection(args, profile, plan)
+    fallback_feedback = validate_terra_fallback(
+        args, plan, plan_item, workspace, task_stats
+    )
     validate_dependencies(args.depends_on)
     active = active_jobs_for_workspace(workspace)
     if active and not args.allow_concurrent_workspace:
@@ -1546,6 +1959,8 @@ def command_launch(args: argparse.Namespace) -> int:
     path = job_dir(selected_job_id, must_exist=False)
     if path.exists():
         raise RunnerError(f"Job already exists: {selected_job_id}")
+    if fallback_feedback:
+        claim_feedback_for_fallback(fallback_feedback["id"], selected_job_id)
     state_home().mkdir(parents=True, exist_ok=True, mode=0o700)
     jobs_dir().mkdir(exist_ok=True, mode=0o700)
     path.mkdir(mode=0o700)
@@ -1593,6 +2008,8 @@ def command_launch(args: argparse.Namespace) -> int:
         "cli_agent": args.cli_agent,
         "max_turns": args.max_turns,
         "max_cost_usd": args.max_cost_usd,
+        "executor_policy": applied_executor_policy,
+        "terra_fallback_feedback_id": fallback_feedback.get("id") if fallback_feedback else None,
         "task_sha256": task_sha256,
         "task_stats": task_stats,
         "context_budget_bytes": route.get("context_budget_bytes") if route else None,
@@ -1653,6 +2070,9 @@ def command_launch(args: argparse.Namespace) -> int:
         "review_state": "required",
         "plan_id": args.plan_id,
         "checklist_item": args.checklist_item,
+        "executor_approval": selected_executor_approval(
+            applied_executor_policy, args.cli, args.model
+        ),
         "workspace": str(workspace),
         "job_dir": str(path),
     }
@@ -1697,7 +2117,25 @@ def command_worker(args: argparse.Namespace) -> int:
         with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
             os.chmod(stdout_path, 0o600)
             os.chmod(stderr_path, 0o600)
-            stdin_handle = prompt_file.open("rb") if transport == "stdin" else subprocess.DEVNULL
+            stdin_path: Path | None = None
+            if transport == "stdin":
+                stdin_handle = prompt_file.open("rb")
+            elif transport == "jsonl-stdin":
+                stdin_path = path / "stdin.jsonl"
+                stdin_path.write_text(
+                    json.dumps(
+                        {
+                            "event": "user",
+                            "message": {"content": prompt_file.read_text(encoding="utf-8")},
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                os.chmod(stdin_path, 0o600)
+                stdin_handle = stdin_path.open("rb")
+            else:
+                stdin_handle = subprocess.DEVNULL
             try:
                 child = subprocess.Popen(
                     command,
@@ -2239,6 +2677,55 @@ def command_dashboard_web(args: argparse.Namespace) -> int:
     return serve(port=args.port, open_browser=not args.no_open)
 
 
+def command_ensure_dashboard(args: argparse.Namespace) -> int:
+    state_home().mkdir(parents=True, exist_ok=True, mode=0o700)
+    runtime: dict[str, Any] | None = None
+    reused = False
+    start_lock = state_home() / "dashboard-start"
+    with record_lock(start_lock):
+        runtime = live_dashboard_runtime()
+        if runtime:
+            reused = True
+        else:
+            log_path = state_home() / "dashboard.log"
+            log = log_path.open("ab", buffering=0)
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "dashboard-web",
+                    "--no-open",
+                    "--port",
+                    str(args.port),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+                close_fds=True,
+            )
+            log.close()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                time.sleep(0.1)
+                runtime = live_dashboard_runtime()
+                if runtime:
+                    break
+    if not runtime:
+        raise RunnerError(
+            f"Dashboard did not become ready; inspect {state_home() / 'dashboard.log'}"
+        )
+    if not args.no_open:
+        webbrowser.open(runtime["url"])
+    output = {
+        **runtime,
+        "reused": reused,
+        "state_file": str(dashboard_runtime_path()),
+    }
+    print(json.dumps(output, indent=2, sort_keys=True) if args.json else runtime["url"])
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2281,6 +2768,29 @@ def build_parser() -> argparse.ArgumentParser:
     create_plan.add_argument("--workspace", default=os.getcwd())
     create_plan.add_argument("--title", required=True)
     create_plan.add_argument("--plan-id")
+    create_plan.add_argument(
+        "--executor",
+        action="append",
+        default=[],
+        metavar="CLI=MODEL",
+        help="Add a user-approved executor; omit =MODEL only for a knowingly approved CLI default",
+    )
+    create_plan.add_argument(
+        "--expensive-executor",
+        action="append",
+        default=[],
+        metavar="CLI=MODEL",
+        help="Add an expensive/frontier executor after explicit user cost approval",
+    )
+    create_plan.add_argument(
+        "--terra-fallback-after-seconds",
+        type=int,
+        metavar="SECONDS",
+        help=(
+            "Pre-approve Terra only after the executor pool is exhausted and linked user "
+            "feedback remains unanswered for this grace period"
+        ),
+    )
     create_plan.add_argument("--json", action="store_true")
     create_plan.set_defaults(func=command_create_plan)
 
@@ -2288,6 +2798,26 @@ def build_parser() -> argparse.ArgumentParser:
     plan_status.add_argument("plan_id")
     plan_status.add_argument("--json", action="store_true")
     plan_status.set_defaults(func=command_plan_status)
+
+    set_executors = subparsers.add_parser(
+        "set-executors", help="Replace a plan's user-approved executor allowlist"
+    )
+    set_executors.add_argument("plan_id")
+    set_executors.add_argument("--executor", action="append", default=[], metavar="CLI=MODEL")
+    set_executors.add_argument(
+        "--expensive-executor", action="append", default=[], metavar="CLI=MODEL"
+    )
+    set_executors.add_argument("--terra-fallback-after-seconds", type=int, metavar="SECONDS")
+    set_executors.add_argument("--json", action="store_true")
+    set_executors.set_defaults(func=command_set_executors)
+
+    executor_options = subparsers.add_parser(
+        "executor-options", help="Show attempted and untried executors for one plan item"
+    )
+    executor_options.add_argument("plan_id")
+    executor_options.add_argument("--checklist-item", required=True)
+    executor_options.add_argument("--json", action="store_true")
+    executor_options.set_defaults(func=command_executor_options)
 
     launch = subparsers.add_parser("launch", help="Launch a detached agent job")
     launch.add_argument("--cli", "--agent", dest="cli")
@@ -2298,6 +2828,29 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--job-id")
     launch.add_argument("--config")
     launch.add_argument("--model")
+    launch.add_argument(
+        "--approved-executor",
+        action="append",
+        default=[],
+        metavar="CLI=MODEL",
+        help="One-off user-approved executor allowlist entry for a non-plan launch",
+    )
+    launch.add_argument(
+        "--approved-expensive-executor",
+        action="append",
+        default=[],
+        metavar="CLI=MODEL",
+        help="One-off expensive/frontier entry after explicit user cost approval",
+    )
+    launch.add_argument(
+        "--use-terra-fallback",
+        action="store_true",
+        help="Use a plan's pre-approved Terra fallback after pool exhaustion and feedback timeout",
+    )
+    launch.add_argument(
+        "--feedback-id",
+        help="Pending linked feedback record proving the user had a chance to respond",
+    )
     launch.add_argument(
         "--reasoning-effort",
         choices=("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
@@ -2414,6 +2967,14 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--port", type=int, default=0)
     web.add_argument("--no-open", action="store_true")
     web.set_defaults(func=command_dashboard_web)
+
+    ensure_web = subparsers.add_parser(
+        "ensure-dashboard", help="Start or reuse the private dashboard for an orchestration session"
+    )
+    ensure_web.add_argument("--port", type=int, default=0)
+    ensure_web.add_argument("--no-open", action="store_true")
+    ensure_web.add_argument("--json", action="store_true")
+    ensure_web.set_defaults(func=command_ensure_dashboard)
 
     request = subparsers.add_parser("request-feedback", help="Request durable project orchestrator feedback")
     request.add_argument("--workspace", default=os.getcwd())

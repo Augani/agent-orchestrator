@@ -1,7 +1,7 @@
 {
   "name": "agent-orchestrator",
-  "version": "0.4.0",
-  "description": "Route durable coding plans between user-selected coordinator and executor models, monitor jobs, and require review evidence.",
+  "version": "0.5.0",
+  "description": "Route durable coding plans through user-approved executor pools, monitor jobs, and require review evidence.",
   "author": {
     "name": "Augustus Otu",
     "url": "https://github.com/Augani"
@@ -13,8 +13,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Orchestrator",
-    "shortDescription": "Choose coordinator and executor models for durable coding plans.",
-    "longDescription": "Codex turns one request into a durable plan, presents installed CLI harnesses and their model or agent choices, supports quality-first, economy-first, or custom model roles, handles clarification questions, captures usage and progress, and requires diff and test evidence before acceptance.",
+    "shortDescription": "Control durable coding plans with approved executor pools.",
+    "longDescription": "Codex turns one request into a durable plan, starts an all-project dashboard, presents installed CLI harnesses and models, locks execution to a user-approved pool, asks in chat and the dashboard before escalation, permits only an optional pre-approved Terra timeout fallback, and requires diff and test evidence before acceptance.",
     "developerName": "Augustus Otu",
     "category": "Productivity",
     "websiteURL": "https://github.com/Augani/agent-orchestrator",
@@ -23,14 +23,16 @@
       "Code delegation",
       "Durable plans",
       "Model routing",
+      "Executor allowlists",
+      "Controlled Terra fallback",
       "Review gates",
       "Local web dashboard",
       "Project feedback"
     ],
     "defaultPrompt": [
-      "Turn this into a durable plan, then use Luna to coordinate and Astra to execute each item.",
-      "Use Astra to plan and review while a cheaper model handles bounded implementation.",
-      "Show me the available routing flows, coding agents, models, plans, and active jobs."
+      "Turn this into a durable plan, show me the installed cheap executors, and ask me which models to allow before launching.",
+      "Use Astra to plan and review, lock implementation to my approved cheaper models, and never use Astra as an automatic executor.",
+      "Start the dashboard, show my plans and active jobs, and ask me in chat and the dashboard before any executor escalation."
     ]
   }
 }

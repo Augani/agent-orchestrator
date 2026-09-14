@@ -13,41 +13,63 @@ Resolve `../../scripts/cli_agent_job.py` relative to this file and invoke it wit
 state is stored outside the repository under `~/.codex/agent-orchestrator/` by default. Set
 `AGENT_ORCHESTRATOR_HOME` only when the user wants a different state location.
 
+At the beginning of every orchestration session, start or reuse the all-project dashboard and make
+its URL visible to the user:
+
+```bash
+python3 <runner> ensure-dashboard --json
+```
+
+This command is idempotent: it reuses the healthy local server recorded for the configured state
+home instead of opening competing dashboard processes.
+
 ## Choose the worker
 
 Treat the CLI, its model, and its internal agent/persona as separate choices. The user may specify
-any subset in natural language; preserve every explicit choice exactly.
+any subset in natural language; preserve every explicit choice exactly. Before the first launch,
+ask the user for the bounded executor pool they authorize for this plan. Never add a model to that
+pool merely because another worker is slow, unavailable, or failed.
 
 1. Run `choices --json` to present installed harnesses alongside the routing flows. If the user
    selects a harness, run `catalog --cli <name>` for its live or configured model and internal-agent
    choices. Use `catalog --cli all --query <model-or-agent>` when the user names a model or agent but
    not the CLI. Use `choices --include-unavailable` only for installation help.
 2. If the user chose only a CLI, show that CLI's available models and internal agents when
-   discoverable. Offer its configured default as a no-extra-choice option.
+   discoverable. Require an explicit model whenever the harness supports selection. Offer a
+   configured default only when the adapter cannot select a model, label it clearly, and get the
+   user's approval.
 3. If the user chose only a model or internal agent, resolve which installed CLIs offer it. If one
    match is clear, use it; if several materially different matches remain, ask one compact choice.
-4. If the user chose neither, recommend an installed option based on task fit, price information in
-   the live catalog, maturity, required context, and supported budget controls. Prefer a stable
-   profile over a preview profile when both fit. Make the CLI/model combination visible before
-   launch; do not silently select an expensive model.
+4. If the user chose neither, recommend a short pool of installed options based on task fit, price
+   information in the live catalog, maturity, required context, and supported budget controls.
+   Prefer stable profiles over preview profiles when both fit. Show every CLI/model pairing and get
+   the user's choice before persisting it. A CLI that exposes model selection must use an explicit
+   model; never rely on its configured default.
 5. Pass the chosen values independently as `--cli`, `--model`, and `--cli-agent`. Omit a dimension
-   to use that CLI's configured default. Never invent a model ID or internal-agent name.
+   only when that CLI cannot select it and the user knowingly approved the configured default.
+   Never invent a model ID or internal-agent name.
+
+Persist normal entries with repeated `--executor CLI=MODEL`. Astra, Fable, Opus, and any model the
+catalog or user identifies as expensive/frontier must be recorded with
+`--expensive-executor CLI=MODEL`, and only after the user explicitly accepts that it may execute
+code. Planning or reviewing with a model is not consent to use it for implementation.
 
 When model roles matter, read
 [routing and durable plans](references/routing-and-plans.md). Present the resolved flow before
 launch and let the user choose:
 
-- `quality-first`: recommends selecting GPT-5.6 Luna for the Codex task; GPT-6 Astra executes at high effort.
-- `economy-first`: recommends selecting GPT-6 Astra for the Codex task; GPT-5.6 Luna executes at high effort.
+- `quality-first`: recommends a capable bounded executor, but requires an explicit executor and
+  separate expensive-executor approval when that recommendation is Astra.
+- `economy-first`: recommends a strong planner/orchestrator and a user-approved lower-cost executor.
 - custom: pass `--coordinator-model`, `--cli`, `--model`, and `--reasoning-effort` explicitly.
 
 The model selected for the current Codex task is always the orchestrator. The runner cannot infer
 that selection, so it records `current-codex-task` unless the user explicitly supplies
-`--coordinator-model`. Routes recommend task models but never overwrite coordinator identity or
-change the current model. Explicit user choices override executor route defaults. Never silently
-substitute the opposite flow.
-The built-in routes use Codex CLI defaults, but either route can be combined with any installed
-harness by passing explicit `--cli`, `--model`, `--cli-agent`, and `--reasoning-effort` values.
+`--coordinator-model`. Routes recommend task models but never overwrite coordinator identity,
+change the current model, or fill executor fields. Every launch requires an explicit executor that
+matches the user's allowlist. Never silently substitute the opposite flow or a frontier model.
+Either route can be combined with any installed harness by passing explicit `--cli`, `--model`,
+`--cli-agent`, and `--reasoning-effort` values.
 
 ```bash
 python3 <runner> catalog --cli grok --json
@@ -82,6 +104,31 @@ context budget, offer to create a durable plan. If the user already requested a 
 the complete end-to-end workflow, create it without another confirmation. The plan keeps decisions
 and checklist state outside model context; bind every executor job to one checklist item.
 
+Create the plan with its approved pool, or set the pool after model discovery:
+
+```bash
+python3 <runner> create-plan \
+  --title '<title>' \
+  --workspace <workspace> \
+  --plan-file <plan.md> \
+  --executor 'devin=swe-2' \
+  --executor 'grok=grok-code-fast-1' \
+  --terra-fallback-after-seconds 900 \
+  --json
+
+python3 <runner> set-executors <plan-id> \
+  --executor 'devin=swe-2' \
+  --executor 'opencode' \
+  --executor 'grok=grok-code-fast-1' \
+  --terra-fallback-after-seconds 900 \
+  --json
+```
+
+The Terra option must be disclosed when asking for the pool. Omit
+`--terra-fallback-after-seconds` if the user does not pre-approve it. `opencode` without `=MODEL`
+means the user explicitly accepted that harness's configured default because the adapter cannot
+select a model itself.
+
 For multiple workers, assign a short `--group` and distinct `--role` to every job. Launch independent
 roles in separate worktrees. Use `--depends-on` for ordered work; never let two jobs write the same
 workspace unless their file scopes are provably disjoint and the user accepts the risk. Pass
@@ -109,12 +156,20 @@ python3 <runner> launch \
   --json
 ```
 
+For a one-off job without a plan, add a matching
+`--approved-executor 'grok=grok-4.6'`. Use
+`--approved-expensive-executor 'codex-cli=gpt-6-astra'` only after explicit cost approval. These
+flags are approval evidence, not switches Codex may invent for convenience.
+
 For a model-routing flow:
 
 ```bash
 python3 <runner> routes
 python3 <runner> launch \
   --route quality-first \
+  --cli codex-cli \
+  --model gpt-6-astra \
+  --approved-expensive-executor 'codex-cli=gpt-6-astra' \
   --plan-id <plan-id> \
   --checklist-item item-001 \
   --workspace <workspace> \
@@ -123,16 +178,27 @@ python3 <runner> launch \
   --json
 ```
 
+The example above is intentionally costly and is valid only when the user specifically chose
+Astra for execution after seeing the warning. Selecting `quality-first`, using Astra to plan, or
+using Astra to review does not provide that approval.
+
 Both built-in routes reject task packets above 64 KiB by default. Prefer a durable plan and smaller
 jobs over `--allow-large-context`; use the override only when decomposition would lose correctness
 and the user accepts the context cost.
 
-Built-in CLI profiles are `deepseek-harness`, `kimi-code`, `codex-cli`, `claude-code`, `devin`,
-`grok`, `gemini`, and `opencode`. `claude` remains as a compatibility alias for `claude-code`.
+Built-in CLI profiles are `antigravity`, `deepseek-harness`, `kimi-code`, `codex-cli`,
+`claude-code`, `devin`, `grok`, `gemini`, and `opencode`. `claude` remains as a compatibility alias
+for `claude-code`.
 Use `profiles` to inspect maturity, installation guidance, prompt transport, and supported selection
 or budget controls. For another CLI, read
 [adapter configuration](references/adapter-config.md) and add a local argv-based adapter; never
 interpolate a shell command.
+
+Antigravity uses the official `agy` sandboxed headless stream protocol. Always discover and pin an
+explicit model with `catalog --cli antigravity`; optionally pin its internal agent and effort. The
+runner sends one JSON user event over private stdin and captures streaming events/usage. Never add
+`--dangerously-skip-permissions`. Antigravity soft-denies unapproved tools in headless mode, so tell
+the user which narrow workspace-write and test-command permission rules the selected task needs.
 
 DeepSeek Harness is a developer-preview adapter and currently passes the task packet as a process
 argument because that is the documented headless interface. Warn the user that the prompt may be
@@ -174,7 +240,8 @@ it to the user. `channel.py event` updates are useful evidence, but they do not 
 For live observability, `observe` returns process health, heartbeat age, elapsed time, pending
 questions, recent events, log tails, and current git status/diff statistics. A user can run
 `watch <job-id>` for one worker or `dashboard --watch --group <group>` for a live multi-worker view.
-After launching long-running jobs, open the web dashboard when helpful:
+The dashboard should already be running from the session-start gate. Use `ensure-dashboard` again
+whenever its health is uncertain; use `dashboard-web` only for deliberate foreground operation:
 
 ```bash
 python3 <runner> dashboard-web
@@ -191,6 +258,42 @@ Use the existing terminal dashboard when a browser is not helpful. Local notific
 enabled by default for completion, failure, scope violations, and questions; use `--no-notify` only
 when the user asks for quiet operation. Do not expose private log content outside the task, and do
 not mistake lack of streamed prose for a stalled process when heartbeats continue.
+
+## Executor failures, delays, and escalation
+
+Do not respond to a slow or failed worker by spawning Astra or another unapproved model. Use the
+declared job timeout and heartbeat evidence instead of deciding that quiet output means failure.
+After a genuine failure, timeout, cancellation, or rejected result:
+
+1. Run `executor-options <plan-id> --checklist-item <item> --json`.
+2. Try an untried entry from the approved pool with a fresh bounded packet. Never leave the pool.
+3. When the pool is exhausted, ask the user in the active Codex chat **and** create the same durable
+   dashboard request with `request-feedback`. State which models were tried, why each failed or was
+   stopped, the cost/quality tradeoff, and the proposed next action.
+4. If the user answers either channel, follow that answer. Never start the timeout fallback after an
+   answer has been recorded.
+5. If the user does not answer within the plan's pre-approved grace period, Terra may execute only
+   when the plan policy enables it. Use a new task capsule below 32 KiB that focuses on one outcome,
+   exact files, known failure evidence, and deterministic tests. Launch with the linked pending
+   feedback record:
+
+```bash
+python3 <runner> launch \
+  --cli codex-cli \
+  --model gpt-5.6-terra \
+  --use-terra-fallback \
+  --feedback-id <pending-feedback-id> \
+  --plan-id <plan-id> \
+  --checklist-item <item> \
+  --workspace <workspace> \
+  --task-file <narrow-repair-packet> \
+  --json
+```
+
+The runner rejects this fallback unless every approved primary executor has already been attempted,
+the feedback is still unanswered and belongs to the same plan item, the grace period elapsed, and
+the packet is narrowly bounded. Terra is the only timeout fallback. Astra never is. If Terra also
+fails, stop and ask the user; do not escalate again automatically.
 
 When the project orchestrator needs a user decision, create a durable feedback record instead of
 putting a question in an unrelated worker job:
@@ -223,8 +326,9 @@ Completion by the worker is not completion of the task.
    worker's test report only as a lead.
 4. Compare behavior with every acceptance criterion and repository definition of done.
 5. If repair is bounded, write a new packet naming exact defects and failing evidence, then launch
-   one repair job. Prefer at most two worker repair passes; after that, take over directly or ask
-   the user whether to spend more agent budget.
+   one repair job from the approved pool. Prefer at most two repair passes. After that, use the
+   failure/delay escalation flow above. Never take over implementation with the orchestrator or
+   spawn a frontier executor unless the user explicitly approved that executor role.
 6. Report what was accepted, changed, tested, and still uncertain. Never imply that a worker's
    output was reviewed when only its prose response was read.
 
@@ -233,7 +337,7 @@ Record the verdict after review:
 ```bash
 python3 <runner> record-review <job-id> \
   --verdict accepted \
-  --reviewer gpt-6-astra \
+  --reviewer current-codex-task \
   --test 'pnpm test: passed' \
   --notes-file <review-notes> \
   --json

@@ -35,8 +35,8 @@ alone. [OpenAI model guidance](https://developers.openai.com/api/docs/guides/lat
 ## What it provides
 
 - Independent selection of CLI, model, and a CLI's internal agent/persona when supported.
-- Built-in profiles for DeepSeek Harness, Kimi Code, Codex CLI, Claude Code, Devin CLI, Grok CLI,
-  Gemini CLI, and OpenCode.
+- Built-in profiles for Google Antigravity CLI, DeepSeek Harness, Kimi Code, Codex CLI, Claude
+  Code, Devin CLI, Grok CLI, Gemini CLI, and OpenCode.
 - Detached jobs with durable status, stdout/stderr logs, heartbeats, progress events, and git diff
   summaries.
 - A job-local question channel that lets a worker pause for a concrete answer without restarting.
@@ -49,6 +49,10 @@ alone. [OpenAI model guidance](https://developers.openai.com/api/docs/guides/lat
   evidence.
 - User-selectable model-role routes, task-capsule budgets, reasoning-effort selection, and
   provider-reported usage capture.
+- Fail-closed executor pools: routes never silently select a model, every launch must match a
+  user-approved CLI/model pairing, and frontier executors need separate cost approval.
+- Controlled escalation that exhausts the approved pool, asks in chat and the dashboard, and can
+  use only a pre-approved Terra fallback after an unanswered grace period.
 - A concise installed-harness chooser followed by harness-specific model and internal-agent
   discovery.
 - A required detailed task contract and a Codex review/repair gate.
@@ -74,6 +78,7 @@ authenticated separately; Agent Orchestrator never stores provider credentials.
 
 | Profile | Model choice | Internal agent | Budget control | Notes |
 | --- | --- | --- | --- | --- |
+| `antigravity` | Yes | Yes | Reasoning effort | Uses `agy` sandboxed headless mode, pinned models, JSONL stdin, and streaming usage. |
 | `codex-cli` | Yes | No | Provider config | Uses `codex exec`, stdin, `workspace-write`, and ephemeral sessions. |
 | `claude-code` | Yes | Yes | `--max-budget-usd` | Uses non-interactive `acceptEdits`; `claude` is a compatibility alias. |
 | `kimi-code` | Yes | Yes | Provider config | Accepts either `kimi` or `kimi-cli`; uses streaming JSON print mode. |
@@ -92,17 +97,25 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py doctor --cli all
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli codex-cli
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli claude-code
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli kimi-code
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py catalog --cli antigravity
 ```
 
 `choices` shows only installed harnesses by default. Once the user chooses one, `catalog` shows its
 live model list where the CLI exposes one, configured aliases otherwise, available internal agents,
 and supported controls. Codex model discovery is compacted to model IDs, descriptions, defaults,
 and reasoning-effort choices instead of loading the CLI's full catalog payload into coordinator
-context. Claude Code currently exposes the configured aliases `sonnet`, `opus`, and `fable`; omit
-`--model` to use the user's Claude default.
+context. Claude Code currently exposes the configured aliases `sonnet`, `opus`, and `fable`.
+Whenever a harness supports model selection, Agent Orchestrator requires an explicit `--model` so
+an unknown configured default cannot silently become an expensive executor.
 
 `doctor --cli all` exits non-zero when any built-in CLI is missing; that is expected when you only
 install the agents you use.
+
+Antigravity uses its official `agy` headless stream protocol, pins `--model`, accepts an optional
+`--agent` and `--effort`, and enables `--sandbox`. The runner sends the complete private task capsule
+as one JSON user event on stdin, so it is not exposed in the process list. It never uses
+`--dangerously-skip-permissions`; configure narrow Antigravity permission rules for the exact write
+paths and validation commands required by the task.
 
 ## Choose a model-role flow
 
@@ -110,21 +123,26 @@ Run `routes` to inspect the built-in policies:
 
 | Route | Recommended Codex task model | Executor | Best when |
 | --- | --- | --- | --- |
-| `quality-first` | GPT-5.6 Luna | Defaults to Codex CLI + GPT-6 Astra, high effort | You want the best bounded execution while keeping the long coordination thread inexpensive. |
-| `economy-first` | GPT-6 Astra | Defaults to Codex CLI + GPT-5.6 Luna, high effort | Architecture and review are hard, but implementation items can be specified precisely. |
+| `quality-first` | GPT-5.6 Luna | Recommends Codex CLI + GPT-6 Astra, but never selects it | You explicitly accept frontier execution cost for a bounded task. |
+| `economy-first` | GPT-6 Astra | Recommends Codex CLI + GPT-5.6 Luna, but never selects it | Architecture and review are hard, but implementation can use an approved lower-cost pool. |
 | Custom | Your choice | Any supported CLI/model/agent/effort | You want another provider or complete control over the pairing. |
 
 The current Codex task model is always the orchestrator. Routes recommend a task model; they do
 not select or change it. Since the runner cannot infer that model, coordinator metadata defaults
 to `current-codex-task` for every route and custom launch. An explicit `--coordinator-model` always
-wins. Routes fill missing executor values only:
+wins. Routes are recommendations only: they never fill CLI, model, agent, or effort values. Every
+launch must name its executor and match the user's durable allowlist or a one-off approval:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py routes
 
-# Your current Codex task coordinates; Astra executes.
+# Costly example: Astra executes only after explicit executor-role and cost approval.
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --route quality-first \
+  --cli codex-cli \
+  --model gpt-6-astra \
+  --reasoning-effort high \
+  --approved-expensive-executor 'codex-cli=gpt-6-astra' \
   --workspace /path/to/worktree \
   --task-file /path/to/task.md \
   --json
@@ -134,6 +152,7 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --coordinator-model gpt-6-astra \
   --cli claude-code \
   --model sonnet \
+  --approved-executor 'claude-code=sonnet' \
   --reasoning-effort high \
   --workspace /path/to/worktree \
   --task-file /path/to/task.md \
@@ -146,6 +165,40 @@ presents what is actually installed, then the selected harness's available model
 
 The coordinator model override is workflow metadata, not a model switch. Select the desired model
 for the Codex task itself. Model availability and billing depend on your account and provider.
+Using Astra for planning or review does not approve it for implementation.
+
+## Lock execution to a user-approved pool
+
+For long work, show the installed choices and ask the user for every CLI/model pairing they allow.
+Persist that list with the plan or replace it later after another explicit user choice:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
+  --title 'Authentication refresh' \
+  --workspace /path/to/project \
+  --plan-file /path/to/plan.md \
+  --executor 'devin=swe-2' \
+  --executor 'grok=grok-code-fast-1' \
+  --executor 'opencode' \
+  --terra-fallback-after-seconds 900 \
+  --json
+
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py set-executors <plan-id> \
+  --executor 'devin=swe-2' \
+  --executor 'grok=grok-code-fast-1' \
+  --terra-fallback-after-seconds 900 \
+  --json
+```
+
+`CLI=MODEL` is exact. A bare CLI is permitted only for adapters such as OpenCode that cannot select
+a model themselves, and means the user knowingly approved that configured default. Astra, Fable,
+Opus, and other known expensive/frontier choices belong under `--expensive-executor`, which records
+that the user accepted execution cost rather than merely using that model to plan or review.
+
+The optional Terra fallback must also be disclosed up front. It does not run merely because a
+worker is quiet: every primary entry must have been attempted, a linked question must be visible in
+the active Codex chat and dashboard, the question must remain unanswered for the configured grace
+period, and the fallback task packet must be under 32 KiB. Astra is never an automatic fallback.
 
 ## One prompt to a durable plan
 
@@ -158,10 +211,15 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py create-plan \
   --title 'Authentication refresh' \
   --workspace /path/to/project \
   --plan-file /path/to/plan.md \
+  --executor 'devin=swe-2' \
+  --executor 'grok=grok-code-fast-1' \
+  --terra-fallback-after-seconds 900 \
   --json
 
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --route quality-first \
+  --cli devin \
+  --model swe-2 \
   --plan-id <plan-id> \
   --checklist-item item-001 \
   --workspace /path/to/worktree \
@@ -169,6 +227,8 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --json
 
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py plan-status <plan-id> --json
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py executor-options <plan-id> \
+  --checklist-item item-001 --json
 ```
 
 Built-in routes cap a task capsule at 64 KiB. Oversized packets are stopped with guidance to create
@@ -180,7 +240,8 @@ durable state instead of an ever-growing model transcript.
 Ask Codex naturally, for example:
 
 > Use Kimi Code with the default agent for this implementation. Give it exact file-level
-> instructions, keep me notified, answer its questions, and review the final diff and tests.
+> instructions, keep me notified, answer its questions, and review the final diff and tests. Do
+> not use any other executor unless I approve it.
 
 Codex will inspect the repository first, produce a task packet with the required objective, why,
 scope, file, implementation, constraint, acceptance, validation, and reporting sections, then run:
@@ -188,7 +249,9 @@ scope, file, implementation, constraint, acceptance, validation, and reporting s
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
   --cli kimi-code \
+  --model <approved-kimi-model> \
   --cli-agent default \
+  --approved-executor 'kimi-code=<approved-kimi-model>' \
   --workspace /path/to/worktree \
   --task-file /path/to/task.md \
   --allow-path 'packages/target/**' \
@@ -208,13 +271,46 @@ python3 plugins/agent-orchestrator/scripts/cli_agent_job.py questions <job-id> -
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py answer <job-id> <question-id> --file answer.md
 ```
 
+When a worker genuinely fails or reaches its declared timeout, inspect `executor-options` and try
+an untried approved entry. Once the pool is exhausted, the orchestrator asks in the active Codex
+chat and creates the same linked dashboard question:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py request-feedback \
+  --workspace /path/to/project \
+  --plan-id <plan-id> \
+  --checklist-item item-001 \
+  --question-file /path/to/escalation-question.md \
+  --json
+```
+
+If the user answers, that answer wins. If the question remains pending past a pre-approved grace
+period, the runner can admit only the configured Terra fallback:
+
+```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py launch \
+  --cli codex-cli \
+  --model gpt-5.6-terra \
+  --use-terra-fallback \
+  --feedback-id <pending-feedback-id> \
+  --plan-id <plan-id> \
+  --checklist-item item-001 \
+  --workspace /path/to/worktree \
+  --task-file /path/to/narrow-repair-task.md \
+  --json
+```
+
+The runner verifies pool exhaustion, feedback ownership/state/age, exact Terra selection, and the
+32 KiB fallback context limit. If Terra fails, execution stops for user direction; there is no
+second automatic escalation.
+
 Successful execution is deliberately not accepted work. Status remains `awaiting_review` until
 Codex inspects the diff, reruns tests, and records evidence:
 
 ```bash
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py record-review <job-id> \
   --verdict accepted \
-  --reviewer gpt-6-astra \
+  --reviewer current-codex-task \
   --test 'pnpm test: passed' \
   --notes-file /path/to/review.md \
   --json
@@ -237,14 +333,16 @@ part of this repository.
 ## Local web dashboard
 
 ```bash
+python3 plugins/agent-orchestrator/scripts/cli_agent_job.py ensure-dashboard --json
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web
 # Keep the browser closed and choose a port (0 asks the OS for a free port).
 python3 plugins/agent-orchestrator/scripts/cli_agent_job.py dashboard-web --no-open --port 0
 ```
 
-The command prints its resolved `http://127.0.0.1:<port>/#token=…` URL and opens the browser by
-default. Keep this process running; Ctrl-C stops the server. The terminal `dashboard` command
-remains available. After launching long-running jobs, Codex can open this dashboard when useful.
+The orchestration skill runs `ensure-dashboard` at the beginning of every session. It starts the
+private local server when needed, opens it, and otherwise reuses the healthy server registered for
+the current state home. This avoids duplicate dashboards while keeping all projects visible.
+`dashboard-web` remains available for foreground operation; Ctrl-C stops that server.
 
 The project rail aggregates **all** workspaces represented by jobs, feedback, or durable plans in
 `AGENT_ORCHESTRATOR_HOME` (default `~/.codex/agent-orchestrator/`), regardless of current directory or
